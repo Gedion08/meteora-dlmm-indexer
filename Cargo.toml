@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/dlmm-decoder", "crates/indexer"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = "line-tables-only"

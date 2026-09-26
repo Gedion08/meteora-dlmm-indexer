@@ -1,0 +1,17 @@
+[package]
+name = "dlmm-decoder"
+description = "IDL-driven decoder for the Meteora DLMM program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bs58 = "0.5"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+base64 = "0.22"

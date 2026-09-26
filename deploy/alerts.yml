@@ -1,0 +1,25 @@
+# Prometheus alerting rules for the indexer.
+groups:
+  - name: dlmm-indexer
+    rules:
+      - alert: DlmmIndexerLagging
+        expr: slot_lag > 20
+        for: 1m
+        labels: { severity: page }
+        annotations:
+          summary: "Indexer is {{ $value }} slots behind the chain tip"
+      - alert: DlmmIndexerNoSources
+        expr: grpc_sources_connected == 0
+        for: 30s
+        labels: { severity: page }
+      - alert: DlmmDecodeFailures
+        expr: increase(decode_failures_total[10m]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: "New DLMM decode failures — IDL may have changed (see decode_failures table)"
+      - alert: DlmmGapRecorded
+        expr: increase(gaps_recorded_total[1h]) > 0
+        labels: { severity: page }
+      - alert: DlmmDbErrors
+        expr: increase(db_errors_total[5m]) > 5
+        labels: { severity: page }
