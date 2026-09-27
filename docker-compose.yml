@@ -31,6 +31,18 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  api:
+    build: .
+    entrypoint: ["dlmm-api"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://dlmm:dlmm@postgres:5432/dlmm
+      LOG_JSON: "true"
+    ports: ["8080:8080"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v3.5.0
     volumes: [./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro]

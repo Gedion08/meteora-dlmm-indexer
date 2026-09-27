@@ -3,6 +3,7 @@ mod config;
 mod extract;
 mod health;
 mod model;
+mod network;
 mod rpc;
 mod snapshot;
 mod source;
@@ -134,7 +135,10 @@ async fn main() -> Result<()> {
         Cmd::Snapshot { db, rpc, types, page_size } => {
             let store = store::Store::connect(&db).await?;
             store.migrate().await?;
-            snapshot::run(&store, &rpc::Rpc::new(rpc.rpc_url)?, &types, page_size).await
+            let rpc = rpc::Rpc::new(rpc.rpc_url)?;
+            let net = network::verify_database(&store, &rpc).await?;
+            tracing::info!(network = net, "snapshot target verified");
+            snapshot::run(&store, &rpc, &types, page_size).await
         }
         Cmd::Migrate { db } => {
             store::Store::connect(&db).await?.migrate().await?;
@@ -156,6 +160,9 @@ async fn run(stream: StreamConfig, db: DbConfig, rpc_cfg: RpcConfig, server: Ser
 
     let store = store::Store::connect(&db).await?;
     store.migrate().await.context("running migrations")?;
+    let rpc_client = rpc::Rpc::new(rpc_cfg.rpc_url)?;
+    let net = network::verify_database(&store, &rpc_client).await?;
+    tracing::info!(network = net, "database network verified");
     let start = store.get_state("checkpoint").await?.unwrap_or(0);
     if start > 0 {
         tracing::info!(checkpoint = start, "resuming from checkpoint");
@@ -167,6 +174,7 @@ async fn run(stream: StreamConfig, db: DbConfig, rpc_cfg: RpcConfig, server: Ser
     let health = Health::new(stream.grpc_endpoints.len(), stream.idle_timeout(), server.max_ready_lag_slots);
     health.observe_indexed(start);
     let sources = build_sources(&stream, dec_program(), &checkpoint, &health)?;
+    network::spawn_stream_check(rpc_client.clone(), health.clone(), shutdown.clone());
 
     let (src_tx, src_rx) = mpsc::channel::<SourceMsg>(50_000);
     let (w_tx, w_rx) = mpsc::channel(2_048);
@@ -183,7 +191,7 @@ async fn run(stream: StreamConfig, db: DbConfig, rpc_cfg: RpcConfig, server: Ser
 
     let writer = writer::Writer {
         store,
-        rpc: rpc::Rpc::new(rpc_cfg.rpc_url)?,
+        rpc: rpc_client,
         flush_interval: Duration::from_millis(db.flush_interval_ms),
         checkpoint,
         health: health.clone(),

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dlmm-decoder", "crates/indexer"]
+members = ["crates/dlmm-decoder", "crates/indexer", "crates/api"]
 
 [workspace.package]
 version = "0.1.0"

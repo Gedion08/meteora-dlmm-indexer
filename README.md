@@ -17,6 +17,21 @@ LaserStream gRPC ──► source (reconnect, replay from checkpoint, ping, idle
                           └── /healthz /readyz /metrics (Prometheus)
 ```
 
+## Networks
+
+The project currently runs on **devnet** (`.env`): Helius LaserStream devnet for streaming,
+Helius devnet RPC, and the same program ID as mainnet.
+
+Each database belongs to exactly one network. On first start the indexer records the
+cluster's genesis hash in `indexer_meta` and refuses to run against a different one, and it
+stops if the gRPC stream and `RPC_URL` are on different clusters. To go to mainnet:
+
+1. Get a gRPC plan that includes mainnet streaming (Helius Business/Professional, or
+   OrbitFlare with Geyser enabled — both work as-is; set `GRPC_ENDPOINTS`/`GRPC_X_TOKENS`).
+2. Point `RPC_URL` at a mainnet RPC and `DATABASE_URL` at a **new, empty** database.
+3. Run on a server with datacenter bandwidth: a mainnet DLMM stream is roughly 3–4 MB/s.
+4. `dlmm-indexer run`, then `dlmm-indexer snapshot` for current state.
+
 ## What gets indexed
 
 | Data | Table / view | Notes |
@@ -58,7 +73,7 @@ cargo run --release -- tail --duration-secs 20
 cargo run --release -- run
 
 # 3. In another terminal: load current state of all pairs / positions / bins
-cargo run --release -- snapshot --types LbPair,PresetParameter2,Oracle,BinArrayBitmapExtension
+cargo run --release -- snapshot --types LbPair,PresetParameter2,Oracle,BinArrayBitmapExtension   # also fills mint decimals
 cargo run --release -- snapshot --types BinArray,PositionV2,LimitOrder     # large; run once
 ```
 
@@ -87,6 +102,77 @@ WHERE block_time > now() - interval '1 hour' GROUP BY 1 ORDER BY 2 DESC;
 
 -- Health of decoding
 SELECT kind, discriminator, count(*), max(error) FROM decode_failures GROUP BY 1, 2;
+```
+
+## API (`dlmm-api`)
+
+A separate read-only service for frontends and bots. Run it next to the indexer:
+
+```bash
+cargo run -p dlmm-api            # listens on API_ADDR (default 0.0.0.0:8080)
+```
+
+Conventions: token amounts are **strings** (u64 overflows JS numbers); `price` is Y per X
+adjusted for token decimals (`null` until decimals are known), `price_raw` is in raw units;
+times are unix seconds; lists are newest-first and paginate with `?cursor=<cursor of last item>`.
+Raw `data` / `args` payloads keep u64 values as JSON numbers — parse them with a
+bigint-safe JSON parser if you need exact values.
+
+| Endpoint | Returns |
+|---|---|
+| `GET /v1/health` | `ok` (no auth) |
+| `GET /v1/status` | checkpoint, finalized slot, seconds behind, decode failures, gaps, live clients |
+| `GET /v1/pairs?mint=&limit=&offset=` | pairs with price, fee params, decimals |
+| `GET /v1/pairs/{pair}` | one pair + `stats_24h` (trades, volume, fees, unique traders) |
+| `GET /v1/pairs/{pair}/bins?radius=35` or `?from_bin=&to_bin=` | liquidity per bin around the active bin |
+| `GET /v1/pairs/{pair}/swaps?limit=&cursor=` | swaps (amounts, fee, fee %, execution price) |
+| `GET /v1/pairs/{pair}/events?names=AddLiquidity,RemoveLiquidity` | any decoded events |
+| `GET /v1/pairs/{pair}/candles?interval=1m\|5m\|15m\|1h\|4h\|1d&from=&to=` | OHLCV (bin price at swap end) |
+| `GET /v1/wallets/{wallet}/positions?include_closed=` | positions with current token amounts |
+| `GET /v1/wallets/{wallet}/swaps` · `/events` | a wallet's activity |
+| `GET /v1/positions/{position}` | position state, amounts and its event history |
+| `GET /v1/tx/{signature}` | every DLMM instruction and event in a transaction |
+| `GET /v1/ws` | live WebSocket feed (below) |
+
+### Live feed (`/v1/ws`)
+
+```jsonc
+// subscribe (all filters optional; omit them for a firehose)
+{"op":"subscribe","channel":"swaps","lb_pair":"<pair>"}
+{"op":"subscribe","channel":"events","wallet":"<wallet>","names":["AddLiquidity","RemoveLiquidity"]}
+{"op":"subscribe","channel":"pairs","lb_pair":"<pair>"}      // active bin / price changes
+{"op":"unsubscribe","id":1}   {"op":"ping"}
+
+// server messages
+{"type":"subscribed","id":1,...}
+{"type":"swap","sub":1,"data":{ /* same shape as /swaps items */ }}
+{"type":"event","sub":2,"data":{ /* same shape as /events items */ }}
+{"type":"pair","sub":3,"data":{"address","slot","active_id","price","price_raw",...}}
+{"type":"lagged","missed":N} | {"type":"resync"}   // refetch via REST with cursors
+```
+
+Messages are pushed when the indexer commits (Postgres `NOTIFY` inside the write
+transaction), so clients never see data that isn't in the database. Delivery is
+at-most-once per connection: on `lagged`/`resync` or reconnect, backfill with REST.
+
+### Production settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `API_KEYS` | *(empty = open)* | comma-separated keys; send as `x-api-key` header or `?api_key=` (WebSocket) |
+| `API_RATE_LIMIT_RPS` | 20 | per key (or per IP when open); burst = 2× |
+| `API_CORS_ORIGINS` | *(any)* | e.g. `https://app.example.com` |
+| `API_STATEMENT_TIMEOUT_MS` | 5000 | caps every query so the API can't starve the indexer |
+| `API_MAX_WS_CLIENTS` | 1000 | |
+
+Use a read-only Postgres role for the API in production:
+
+```sql
+CREATE ROLE dlmm_api LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE dlmm TO dlmm_api;
+GRANT USAGE ON SCHEMA public TO dlmm_api;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO dlmm_api;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dlmm_api;
 ```
 
 ## Reliability model
@@ -125,7 +211,7 @@ cargo run --release -- tail --duration-secs 60 --record fixtures/stream.bin   # 
 
 ## Roadmap (not in this MVP)
 
-- Week 3: REST/WebSocket API for frontend and bots (Redis pub/sub fan-out), OHLCV candles
-  (Timescale continuous aggregates), token metadata and USD prices.
+- ~~Week 3: REST/WebSocket API~~ ✅ done (`dlmm-api`). Next: USD prices, token metadata,
+  TVL from reserve balances, Timescale continuous aggregates when candle queries get heavy.
 - Week 4: reconciliation jobs vs. on-chain state, Grafana dashboards, Kubernetes manifests.
 - Later: historical backfill (Old Faithful) into the same tables; ClickHouse for analytics.

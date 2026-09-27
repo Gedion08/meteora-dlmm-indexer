@@ -120,6 +120,47 @@ pub async fn run(store: &Store, rpc: &Rpc, types: &[String], page_size: usize) -
         }
         tracing::info!(account_type = %ty, total, failed, "snapshot finished");
     }
+    if types.iter().any(|t| t == "LbPair") {
+        fill_mints(store, rpc).await?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct MintAccount {
+    owner: String,
+    data: (String, String),
+}
+
+/// Fetch decimals for every pair mint we don't know yet. SPL Token and Token-2022 mints
+/// both store `decimals` at byte 44, so a 1-byte data slice is enough.
+async fn fill_mints(store: &Store, rpc: &Rpc) -> Result<()> {
+    let missing: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT m FROM (
+             SELECT data->>'token_x_mint' AS m FROM accounts WHERE account_type = 'LbPair'
+             UNION SELECT data->>'token_y_mint' FROM accounts WHERE account_type = 'LbPair') t
+         WHERE m IS NOT NULL AND m NOT IN (SELECT mint FROM mints)",
+    )
+    .fetch_all(store.pool())
+    .await?;
+    tracing::info!(missing = missing.len(), "fetching mint decimals");
+    let mut rows = Vec::new();
+    for chunk in missing.chunks(100) {
+        let res: WithCtx<Vec<Option<MintAccount>>> = rpc
+            .call(
+                "getMultipleAccounts",
+                json!([chunk, { "encoding": "base64", "dataSlice": { "offset": 44, "length": 1 } }]),
+            )
+            .await?;
+        for (mint, acc) in chunk.iter().zip(res.value) {
+            let Some(acc) = acc else { continue };
+            if let Some(&d) = decode_b64(&acc.data).ok().as_deref().and_then(|b| b.first()) {
+                rows.push((mint.clone(), d as i16, acc.owner));
+            }
+        }
+    }
+    crate::store::upsert_mint_rows(store.pool(), &rows).await?;
+    tracing::info!(mints = rows.len(), "mint decimals stored");
     Ok(())
 }
 

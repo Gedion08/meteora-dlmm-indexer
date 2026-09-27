@@ -55,6 +55,25 @@ impl Store {
         set_state(&mut *self.pool.acquire().await?, key, slot).await
     }
 
+    pub async fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT value FROM indexer_meta WHERE key = $1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    pub async fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO indexer_meta (key, value) VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn record_gap(&self, from: u64, to: u64, reason: &str) -> Result<()> {
         sqlx::query("INSERT INTO gaps (from_slot, to_slot, reason) VALUES ($1, $2, $3)")
             .bind(from as i64)
@@ -66,10 +85,24 @@ impl Store {
     }
 
     /// Write several slot batches and (optionally) advance the checkpoint, atomically.
+    /// Listeners on `dlmm_commit` (the API) are notified at commit time with the slots
+    /// that received new rows, so they never see a notification for uncommitted data.
     pub async fn write(&self, batches: &[SlotBatch], checkpoint: Option<u64>) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for b in batches {
             write_batch(&mut tx, b).await?;
+        }
+        upsert_mints(&mut tx, batches).await?;
+        let slots: Vec<u64> = batches
+            .iter()
+            .filter(|b| !b.events.is_empty() || !b.instructions.is_empty() || !b.accounts.is_empty() || !b.closes.is_empty())
+            .map(|b| b.slot)
+            .collect();
+        if !slots.is_empty() {
+            sqlx::query("SELECT pg_notify('dlmm_commit', $1)")
+                .bind(serde_json::json!({ "slots": slots }).to_string())
+                .execute(&mut *tx)
+                .await?;
         }
         if let Some(cp) = checkpoint {
             set_state(&mut *tx, "checkpoint", cp).await?;
@@ -259,6 +292,45 @@ async fn write_batch(tx: &mut Transaction<'_, Postgres>, b: &SlotBatch) -> Resul
     Ok(())
 }
 
+/// Record token decimals seen in transaction token balances (needed for UI prices).
+async fn upsert_mints(tx: &mut Transaction<'_, Postgres>, batches: &[SlotBatch]) -> Result<()> {
+    let mut mints: std::collections::BTreeMap<String, (i16, Option<String>)> = Default::default();
+    for t in batches.iter().flat_map(|b| &b.txs) {
+        for bal in [&t.pre_token_balances, &t.post_token_balances] {
+            for e in bal.as_array().into_iter().flatten() {
+                if let (Some(m), Some(d)) = (e["mint"].as_str(), e["decimals"].as_u64()) {
+                    mints.entry(m.to_owned()).or_insert((d as i16, e["program_id"].as_str().map(str::to_owned)));
+                }
+            }
+        }
+    }
+    if mints.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<_> = mints.into_iter().collect();
+    for chunk in rows.chunks(chunk_size(3)) {
+        let mut q = QueryBuilder::<Postgres>::new("INSERT INTO mints (mint, decimals, token_program) ");
+        q.push_values(chunk, |mut r, (m, (d, p))| {
+            r.push_bind(m).push_bind(*d).push_bind(p);
+        });
+        q.push(" ON CONFLICT (mint) DO NOTHING");
+        q.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+pub async fn upsert_mint_rows(pool: &sqlx::PgPool, rows: &[(String, i16, String)]) -> Result<()> {
+    for chunk in rows.chunks(chunk_size(3)) {
+        let mut q = QueryBuilder::<Postgres>::new("INSERT INTO mints (mint, decimals, token_program) ");
+        q.push_values(chunk, |mut r, (m, d, p)| {
+            r.push_bind(m).push_bind(*d).push_bind(p);
+        });
+        q.push(" ON CONFLICT (mint) DO UPDATE SET decimals = EXCLUDED.decimals, token_program = EXCLUDED.token_program, updated_at = now()");
+        q.build().execute(pool).await?;
+    }
+    Ok(())
+}
+
 async fn upsert_accounts(tx: &mut Transaction<'_, Postgres>, rows: &[AccountRow]) -> Result<()> {
     for chunk in rows.chunks(chunk_size(10)) {
         let mut q = QueryBuilder::<Postgres>::new(
@@ -314,4 +386,10 @@ async fn insert_failures(tx: &mut Transaction<'_, Postgres>, rows: &[DecodeFailu
         q.build().execute(&mut **tx).await?;
     }
     Ok(())
+}
+
+impl Store {
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
