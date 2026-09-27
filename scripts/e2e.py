@@ -228,6 +228,9 @@ def t_jobs():
     wait_for(lambda: int(sql1("SELECT count(*) FROM pair_stats_24h")) > 0, 60, "pair_stats_24h refresh", interval=2)
     wait_for(lambda: sql1("SELECT count(*) FROM mints WHERE metadata_checked_at IS NULL") == "0", 240,
              "token metadata backlog", interval=3)
+    # The pool ranking refreshes with the stats; wait until it carries the symbols.
+    wait_for(lambda: int(sql1("SELECT count(*) FROM pair_rank WHERE symbol_x_lc IS NOT NULL OR symbol_y_lc IS NOT NULL")) > 0,
+             60, "pair_rank refresh with symbols", interval=2)
     stats = sql1("SELECT count(*) || ' pools with 24h stats' FROM pair_stats_24h")
     meta = sql1("SELECT count(symbol) || ' of ' || count(*) || ' mints have a symbol' FROM mints")
     trades = int(sql1("SELECT trades FROM global_stats_24h"))

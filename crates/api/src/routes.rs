@@ -170,6 +170,14 @@ const PAIR_COLS: &str = "
     END AS fees_24h_y,
     extract(epoch FROM s.computed_at)::bigint AS stats_computed_at";
 
+/// Joins that PAIR_COLS reads from, given `accounts a` for the pool.
+const PAIR_JOINS_A: &str = "
+    LEFT JOIN mints mx ON mx.mint = a.data->>'token_x_mint'
+    LEFT JOIN mints my ON my.mint = a.data->>'token_y_mint'
+    LEFT JOIN token_balances rx ON rx.account = a.data->>'reserve_x'
+    LEFT JOIN token_balances ry ON ry.account = a.data->>'reserve_y'
+    LEFT JOIN pair_stats_24h s ON s.lb_pair = a.pubkey";
+
 const PAIR_FROM: &str = "
     FROM accounts a
     LEFT JOIN mints mx ON mx.mint = a.data->>'token_x_mint'
@@ -262,14 +270,20 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
     if let Some(m) = &p.mint {
         pubkey(m)?;
     }
-    let mut q = QueryBuilder::new(format!(
-        "SELECT coalesce(json_agg(t ORDER BY t.rn), '[]')::text FROM (SELECT *, row_number() OVER () AS rn FROM (SELECT {PAIR_COLS} {PAIR_FROM}"
-    ));
-    // (ORDER BY below keeps json_agg in the subquery's order.)
+    let order = match p.sort.as_deref().unwrap_or("trades") {
+        "trades" => "trades_24h DESC, tvl_in_y DESC NULLS LAST, lb_pair",
+        "volume" => "volume_24h_y DESC NULLS LAST, lb_pair",
+        "tvl" => "tvl_in_y DESC NULLS LAST, lb_pair",
+        "change" => "price_change_24h DESC NULLS LAST, lb_pair",
+        "recent" => "slot DESC, lb_pair",
+        _ => return Err(bad("sort must be trades, volume, tvl, change or recent")),
+    };
+    // 1) Pick the page from the precomputed ranking (index scan, cheap).
+    let mut q = QueryBuilder::new("WITH page AS (SELECT lb_pair FROM pair_rank r WHERE true");
     if let Some(m) = p.mint {
-        q.push(" AND (a.data->>'token_x_mint' = ")
+        q.push(" AND (r.token_x_mint = ")
             .push_bind(m.clone())
-            .push(" OR a.data->>'token_y_mint' = ")
+            .push(" OR r.token_y_mint = ")
             .push_bind(m)
             .push(")");
     }
@@ -278,11 +292,11 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
             return Err(bad("search term too long"));
         }
         if pubkey(term).is_ok() {
-            q.push(" AND (a.pubkey = ")
+            q.push(" AND (r.lb_pair = ")
                 .push_bind(term.to_owned())
-                .push(" OR a.data->>'token_x_mint' = ")
+                .push(" OR r.token_x_mint = ")
                 .push_bind(term.to_owned())
-                .push(" OR a.data->>'token_y_mint' = ")
+                .push(" OR r.token_y_mint = ")
                 .push_bind(term.to_owned())
                 .push(")");
         } else {
@@ -294,20 +308,20 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
                 .collect();
             match parts.as_slice() {
                 [one] => {
-                    q.push(" AND (lower(mx.symbol) LIKE ")
+                    q.push(" AND (r.symbol_x_lc LIKE ")
                         .push_bind(one.clone())
-                        .push(" OR lower(my.symbol) LIKE ")
+                        .push(" OR r.symbol_y_lc LIKE ")
                         .push_bind(one.clone())
                         .push(")");
                 }
                 [a, b, ..] => {
-                    q.push(" AND ((lower(mx.symbol) LIKE ")
+                    q.push(" AND ((r.symbol_x_lc LIKE ")
                         .push_bind(a.clone())
-                        .push(" AND lower(my.symbol) LIKE ")
+                        .push(" AND r.symbol_y_lc LIKE ")
                         .push_bind(b.clone())
-                        .push(") OR (lower(mx.symbol) LIKE ")
+                        .push(") OR (r.symbol_x_lc LIKE ")
                         .push_bind(b.clone())
-                        .push(" AND lower(my.symbol) LIKE ")
+                        .push(" AND r.symbol_y_lc LIKE ")
                         .push_bind(a.clone())
                         .push("))");
                 }
@@ -315,16 +329,14 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
             }
         }
     }
-    let order = match p.sort.as_deref().unwrap_or("trades") {
-        "trades" => "trades_24h DESC, tvl_in_y DESC NULLS LAST, a.slot DESC",
-        "volume" => "volume_24h_y DESC NULLS LAST, a.slot DESC",
-        "tvl" => "tvl_in_y DESC NULLS LAST, a.slot DESC",
-        "change" => "price_change_24h DESC NULLS LAST, a.slot DESC",
-        "recent" => "a.slot DESC",
-        _ => return Err(bad("sort must be trades, volume, tvl, change or recent")),
-    };
+    // 2) Full, live details for just that page, in page order.
     q.push(format!(
-        " ORDER BY {order} LIMIT {} OFFSET {}) ordered) t",
+        " ORDER BY {order} LIMIT {} OFFSET {}),
+         ranked AS (SELECT lb_pair, ord FROM unnest(ARRAY(SELECT lb_pair FROM page)) WITH ORDINALITY AS u(lb_pair, ord))
+         SELECT coalesce(json_agg(t ORDER BY t.ord), '[]')::text FROM (
+             SELECT {PAIR_COLS}, ranked.ord
+             FROM ranked JOIN accounts a ON a.pubkey = ranked.lb_pair AND a.closed_slot IS NULL
+             {PAIR_JOINS_A}) t",
         limit(p.limit, 100, 500),
         p.offset.unwrap_or(0).clamp(0, 1_000_000)
     ));

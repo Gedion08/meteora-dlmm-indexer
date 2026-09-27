@@ -56,6 +56,8 @@ pub async fn refresh_stats(store: &Store) -> Result<()> {
     let started = std::time::Instant::now();
     sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY pair_stats_24h").execute(store.pool()).await?;
     sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY global_stats_24h").execute(store.pool()).await?;
+    // Depends on pair_stats_24h, token balances and metadata: refresh last.
+    sqlx::query("REFRESH MATERIALIZED VIEW CONCURRENTLY pair_rank").execute(store.pool()).await?;
     metrics::histogram!("stats_refresh_seconds").record(started.elapsed().as_secs_f64());
     Ok(())
 }

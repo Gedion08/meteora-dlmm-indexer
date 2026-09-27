@@ -46,6 +46,7 @@ stops if the gRPC stream and `RPC_URL` are on different clusters. To go to mainn
 | Pool reserves / TVL | `token_balances` → `pair_reserves` | from post-tx token balances + snapshot |
 | Token decimals, symbols, logos | `mints` | decimals from balances/snapshot; symbol/logo via DAS job |
 | Rolling 24h pool stats | `pair_stats_24h`, `global_stats_24h` | materialized, refreshed every `STATS_INTERVAL_SECS` |
+| Pool ranking / search | `pair_rank` | sort + search fields per pool, refreshed with the stats; the list endpoint picks a page here and computes live details only for that page |
 
 Decoding is driven by `idl/dlmm.json` at runtime-free cost (parsed once), so an IDL
 update is a file swap: replace `idl/dlmm.json`, rebuild, and rows in `decode_failures`

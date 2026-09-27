@@ -24,6 +24,15 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => StatusCode::NOT_FOUND,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::Db(sqlx::Error::PoolTimedOut) => {
+                // Every connection is busy: tell clients to back off, not that we broke.
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "1")],
+                    Json(json!({"error": "server busy, retry shortly"})),
+                )
+                    .into_response();
+            }
             ApiError::Db(e) => {
                 // Statement timeouts are the client's query being too expensive.
                 if let sqlx::Error::Database(d) = e {
