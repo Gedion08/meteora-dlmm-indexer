@@ -1,0 +1,146 @@
+/*
+ * Binscope design tokens.
+ * Bare :root = light. Dark applies via the OS setting unless the user picked light,
+ * and via an explicit data-theme="dark". Components only ever read these tokens.
+ *
+ * Chart colors (up / down / series) were validated with the dataviz palette checker
+ * as one set, all pairs, against each theme's surface: they never collide on a page.
+ */
+:root {
+  color-scheme: light;
+
+  /* grounds & lines — neutrals lean slightly blue, toward the slate identity */
+  --bg: #f2f4f7;
+  --surface: #ffffff;
+  --surface-2: #f6f8fa;
+  --surface-hover: #eef2f6;
+  --line: #e0e5eb;
+  --line-strong: #c8d0da;
+
+  /* ink */
+  --ink: #0e1621;
+  --ink-2: #445162;
+  --ink-3: #6b7888;
+
+  /* accent: amber = selection / focus / "you are here". Never used for data. */
+  --accent: #9a6212;
+  --accent-soft: #f6ead6;
+  --accent-ink: #ffffff;
+  --focus: #b7791f;
+
+  /* market polarity (charts) + readable text variants */
+  --up: #0f9a8a;
+  --down: #d93f3c;
+  --up-text: #0a7468;
+  --down-text: #b3302d;
+  --series: #2a78d6;
+  --series-soft: rgba(42, 120, 214, 0.1);
+
+  /* status (health), always paired with an icon + label */
+  --good: #0ca30c;
+  --warning: #b87a00;
+  --critical: #d03b3b;
+
+  /* chart chrome */
+  --grid: #e8ecf0;
+  --axis: #c8d0da;
+
+  --shadow-pop: 0 8px 24px rgba(14, 22, 33, 0.12), 0 1px 3px rgba(14, 22, 33, 0.08);
+
+  --font-ui: "Instrument Sans Variable", "Instrument Sans", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  /* type scale (px): 11 · 12 · 13 · 14 · 16 · 20 · 28 · 34 */
+  --t-xxs: 0.6875rem;
+  --t-xs: 0.75rem;
+  --t-sm: 0.8125rem;
+  --t-md: 0.875rem;
+  --t-lg: 1rem;
+  --t-xl: 1.25rem;
+  --t-2xl: 1.75rem;
+  --t-3xl: 2.125rem;
+
+  /* spacing scale: 4px base */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+  --gutter: 24px;
+  --maxw: 1440px;
+  --topbar-h: 56px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0e1318;
+    --surface: #141a21;
+    --surface-2: #1a222b;
+    --surface-hover: #1e2731;
+    --line: #232d38;
+    --line-strong: #33404d;
+    --ink: #e7ecf1;
+    --ink-2: #a3afbc;
+    --ink-3: #74828f;
+    --accent: #dca54a;
+    --accent-soft: rgba(220, 165, 74, 0.14);
+    --accent-ink: #1a1206;
+    --focus: #dca54a;
+    --up: #26a69a;
+    --down: #ef5350;
+    --up-text: #3cc0b2;
+    --down-text: #ff6f6b;
+    --series: #3987e5;
+    --series-soft: rgba(57, 135, 229, 0.12);
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #e5534f;
+    --grid: #1d2630;
+    --axis: #33404d;
+    --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0e1318;
+  --surface: #141a21;
+  --surface-2: #1a222b;
+  --surface-hover: #1e2731;
+  --line: #232d38;
+  --line-strong: #33404d;
+  --ink: #e7ecf1;
+  --ink-2: #a3afbc;
+  --ink-3: #74828f;
+  --accent: #dca54a;
+  --accent-soft: rgba(220, 165, 74, 0.14);
+  --accent-ink: #1a1206;
+  --focus: #dca54a;
+  --up: #26a69a;
+  --down: #ef5350;
+  --up-text: #3cc0b2;
+  --down-text: #ff6f6b;
+  --series: #3987e5;
+  --series-soft: rgba(57, 135, 229, 0.12);
+  --good: #0ca30c;
+  --warning: #fab219;
+  --critical: #e5534f;
+  --grid: #1d2630;
+  --axis: #33404d;
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+@media (max-width: 720px) {
+  :root {
+    --gutter: 16px;
+  }
+}

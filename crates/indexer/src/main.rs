@@ -2,6 +2,7 @@ mod assembler;
 mod config;
 mod extract;
 mod health;
+mod metadata;
 mod model;
 mod network;
 mod reconcile;
@@ -324,6 +325,39 @@ fn spawn_maintenance(
             }
         });
     }
+    if cfg.stats_interval_secs > 0 {
+        let (store, sd) = (store.clone(), shutdown.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(cfg.stats_interval_secs));
+            loop {
+                tokio::select! { _ = sd.cancelled() => return, _ = tick.tick() => {} }
+                if let Err(e) = metadata::refresh_stats(&store).await {
+                    tracing::error!(error = format!("{e:#}"), "stats refresh failed");
+                }
+            }
+        });
+    }
+    if cfg.metadata_interval_secs > 0 {
+        let (store, rpc, sd) = (store.clone(), rpc.clone(), shutdown.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(cfg.metadata_interval_secs));
+            loop {
+                tokio::select! { _ = sd.cancelled() => return, _ = tick.tick() => {} }
+                // Drain the backlog in batches, then wait for the next tick.
+                loop {
+                    match metadata::fill_batch(&store, &rpc, 1000).await {
+                        Ok(0) => break,
+                        Ok(n) => tracing::debug!(checked = n, "token metadata batch"),
+                        Err(e) => {
+                            tracing::warn!(error = format!("{e:#}"),
+                                "token metadata lookup failed (RPC may not support DAS); disabling");
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+    }
     if cfg.reconcile_interval_secs > 0 {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(cfg.reconcile_interval_secs));
@@ -346,6 +380,7 @@ fn register_metrics() {
     for name in [
         "transactions_total", "transactions_ignored_total", "db_errors_total", "db_rows_written_total",
         "gaps_recorded_total", "gaps_repaired_total", "reconcile_checked_total", "dead_slots_total",
+        "token_metadata_checked_total",
     ] {
         metrics::counter!(name).increment(0);
     }

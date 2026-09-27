@@ -159,7 +159,10 @@ async fn publish(pool: &PgPool, hub: &Hub, seen: &mut Seen, slots: &[i64]) -> Re
                     'inner_index', e.inner_index, 'block_time', extract(epoch FROM e.block_time)::bigint,
                     'name', e.name, 'lb_pair', e.lb_pair, 'position', e.position, 'wallet', e.wallet,
                     'data', e.data,
-                    'cursor', concat_ws('.', e.slot, e.tx_index, e.ix_index, e.inner_index))::text AS event_json,
+                    'cursor', concat_ws('.', e.slot, e.tx_index, e.ix_index, e.inner_index),
+                    'symbol_x', mx.symbol, 'symbol_y', my.symbol,
+                    'decimals_x', mx.decimals, 'decimals_y', my.decimals,
+                    'token_x_mint', p.data->>'token_x_mint', 'token_y_mint', p.data->>'token_y_mint')::text AS event_json,
                 CASE WHEN e.name = 'Swap' THEN json_build_object(
                     'signature', e.signature, 'slot', e.slot, 'tx_index', e.tx_index, 'ix_index', e.ix_index,
                     'inner_index', e.inner_index, 'block_time', extract(epoch FROM e.block_time)::bigint,
@@ -172,7 +175,10 @@ async fn publish(pool: &PgPool, hub: &Hub, seen: &mut Seen, slots: &[i64]) -> Re
                     'price_raw', dlmm_bin_price((e.data->>'end_bin_id')::int, (p.data->>'bin_step')::int),
                     'price', CASE WHEN mx.decimals IS NOT NULL AND my.decimals IS NOT NULL THEN
                         dlmm_ui_price((e.data->>'end_bin_id')::int, (p.data->>'bin_step')::int, mx.decimals, my.decimals) END,
-                    'cursor', concat_ws('.', e.slot, e.tx_index, e.ix_index, e.inner_index))::text
+                    'cursor', concat_ws('.', e.slot, e.tx_index, e.ix_index, e.inner_index),
+                    'symbol_x', mx.symbol, 'symbol_y', my.symbol,
+                    'decimals_x', mx.decimals, 'decimals_y', my.decimals,
+                    'token_x_mint', p.data->>'token_x_mint', 'token_y_mint', p.data->>'token_y_mint')::text
                 ELSE '' END AS swap_json
          FROM events e
          LEFT JOIN accounts p ON p.pubkey = e.lb_pair

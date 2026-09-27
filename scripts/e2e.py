@@ -117,7 +117,7 @@ def log_text(name):
 
 
 IDX_ENV = {"HTTP_ADDR": IDX_HTTP, "AUDIT_INTERVAL_SECS": "10", "RECONCILE_INTERVAL_SECS": "15",
-           "RECONCILE_SAMPLE": "20"}
+           "RECONCILE_SAMPLE": "20", "STATS_INTERVAL_SECS": "10", "METADATA_INTERVAL_SECS": "5"}
 API_ENV = {"API_ADDR": API_HTTP, "API_METRICS_ADDR": API_METRICS, "API_KEYS": API_KEY,
            "API_RATE_LIMIT_RPS": "100"}
 
@@ -223,6 +223,18 @@ def t_swaps_view():
     return f"{view} rows"
 
 
+@check("background jobs: 24h stats refreshed, token metadata looked up")
+def t_jobs():
+    wait_for(lambda: int(sql1("SELECT count(*) FROM pair_stats_24h")) > 0, 60, "pair_stats_24h refresh", interval=2)
+    wait_for(lambda: sql1("SELECT count(*) FROM mints WHERE metadata_checked_at IS NULL") == "0", 240,
+             "token metadata backlog", interval=3)
+    stats = sql1("SELECT count(*) || ' pools with 24h stats' FROM pair_stats_24h")
+    meta = sql1("SELECT count(symbol) || ' of ' || count(*) || ' mints have a symbol' FROM mints")
+    trades = int(sql1("SELECT trades FROM global_stats_24h"))
+    assert trades > 0, "global stats empty"
+    return f"{stats}; {meta}; {trades} swaps in 24h"
+
+
 @check("API starts")
 def t_start_api():
     PROCS["api"] = start("api", ["dlmm-api"], API_ENV)
@@ -245,16 +257,22 @@ def t_rest():
     owner = pick(f"SELECT owner_wallet FROM accounts WHERE pubkey='{pos}'")
     expect = {
         "/v1/status": ["checkpoint_slot", "finalized_slot", "seconds_behind"],
-        "/v1/pairs?limit=3": ["address", "price", "reserve_x_amount", "tvl_in_y"],
+        "/v1/stats": ["network", "pairs", "trades_24h", "traders_24h", "active_pairs_24h"],
+        "/v1/pairs?limit=3": ["address", "price", "reserve_x_amount", "tvl_in_y", "symbol_x", "trades_24h",
+                              "volume_24h_y", "fees_24h_y", "price_change_24h", "logo_x"],
         "/v1/pairs?sort=tvl&limit=3": ["address", "tvl_in_y"],
-        f"/v1/pairs/{pair}": ["price", "stats_24h", "reserve_x_amount", "tvl_in_y", "decimals_x"],
+        "/v1/pairs?sort=volume&limit=3": ["address", "volume_24h_y"],
+        "/v1/pairs?sort=change&limit=3": ["address", "price_change_24h"],
+        "/v1/pairs?q=SOL&limit=3": ["address", "symbol_x", "symbol_y"],
+        f"/v1/pairs?q={pair}": ["address"],
+        f"/v1/pairs/{pair}": ["price", "stats_24h", "reserve_x_amount", "tvl_in_y", "decimals_x", "trades_24h"],
         f"/v1/pairs/{pair}/bins?radius=10": ["active_id", "bins"],
-        f"/v1/pairs/{pair}/swaps?limit=5": ["signature", "amount_in", "price", "cursor"],
+        f"/v1/pairs/{pair}/swaps?limit=5": ["signature", "amount_in", "price", "cursor", "decimals_x", "token_x_mint"],
         f"/v1/pairs/{pair}/events?names=Swap2Evt&limit=2": ["name", "data"],
         f"/v1/pairs/{pair}/candles?interval=1m": ["candles", "decimals_adjusted"],
         f"/v1/wallets/{wallet}/swaps?limit=2": ["signature", "trader"],
         f"/v1/wallets/{wallet}/events?limit=2": ["name"],
-        f"/v1/wallets/{owner}/positions": ["address", "amount_x", "amount_y"],
+        f"/v1/wallets/{owner}/positions": ["address", "amount_x", "amount_y", "active_id", "bin_step", "symbol_x"],
         f"/v1/positions/{pos}": ["owner", "amount_x", "events"],
         f"/v1/tx/{sig}": ["instructions", "events", "token_balances"],
     }
@@ -268,7 +286,14 @@ def t_rest():
     top = http("/v1/pairs?sort=tvl&limit=5")[1]
     tvls = [p["tvl_in_y"] for p in top if p["tvl_in_y"] is not None]
     assert tvls == sorted(tvls, reverse=True), "tvl sort"
-    return f"{len(expect)} endpoints"
+    active = http("/v1/pairs?sort=trades&limit=5")[1]
+    trades = [p["trades_24h"] for p in active]
+    assert trades == sorted(trades, reverse=True) and trades[0] > 0, f"trades sort {trades}"
+    exact = http(f"/v1/pairs?q={pair}")[1]
+    assert len(exact) == 1 and exact[0]["address"] == pair, "address search"
+    sol = http("/v1/pairs?q=SOL&limit=20")[1]
+    assert sol and all("sol" in ((p["symbol_x"] or "") + (p["symbol_y"] or "")).lower() for p in sol), "symbol search"
+    return f"{len(expect)} endpoints; sorts and search verified"
 
 
 @check("REST: pagination, validation, 404, auth, rate limit")
@@ -410,6 +435,34 @@ def t_metrics():
     return f"{len(used)} referenced metrics OK; slot_lag={lag:.0f}"
 
 
+WEB = ROOT / "web"
+
+
+@check("frontend: typecheck, unit tests, production build, served app talks to the API")
+def t_frontend():
+    npm = {**os.environ, "PATH": os.environ["PATH"]}
+    for cmd in (["npm", "run", "typecheck"], ["npx", "vitest", "run"], ["npm", "run", "build"]):
+        r = subprocess.run(cmd, cwd=WEB, capture_output=True, text=True, env=npm, timeout=600)
+        assert r.returncode == 0, f"{' '.join(cmd)} failed:\n{r.stdout[-1200:]}{r.stderr[-800:]}"
+    # Serve the built bundle against the e2e API, exactly as the dev proxy does.
+    log = open(LOGS / "web-preview.log", "w")
+    proc = subprocess.Popen(["npx", "vite", "preview", "--port", "14173", "--strictPort"], cwd=WEB, stdout=log,
+                            stderr=subprocess.STDOUT, env={**npm, "BINSCOPE_API": f"http://{API_HTTP}"}, start_new_session=True)
+    try:
+        html = wait_for(lambda: http("/", None, "127.0.0.1:14173", raw=True)[1], 30, "vite preview")
+        assert '<div id="root">' in html and "/assets/" in html, "index.html not served"
+        # SPA deep links must fall back to index.html.
+        code, deep = http("/pool/11111111111111111111111111111111", None, "127.0.0.1:14173", raw=True)
+        assert code == 200 and '<div id="root">' in deep, "deep link not served"
+        code, stats = http("/v1/stats", API_KEY, "127.0.0.1:14173")
+        assert code == 200 and stats["pairs"] > 0, f"proxy to API failed: {code}"
+        js = re.findall(r'src="(/assets/[^"]+\.js)"', html)
+        assert js and http(js[0], None, "127.0.0.1:14173", raw=True)[0] == 200, "bundle not served"
+    finally:
+        os.killpg(proc.pid, signal.SIGTERM)
+    return "typecheck + unit tests + build OK; bundle, deep links and API proxy served"
+
+
 @check("graceful shutdown of API and indexer")
 def t_shutdown():
     a = stop(PROCS.pop("api"))
@@ -424,8 +477,9 @@ def main():
     args = ap.parse_args()
     LOGS.mkdir(parents=True, exist_ok=True)
     print(f"E2E against {ENV['GRPC_ENDPOINTS'].split('//')[-1]} — schema e2e, logs in {LOGS}\n", flush=True)
-    steps = [t_migrate, t_tail, t_guard, t_start_indexer, t_snapshot, t_live_data, t_swaps_view,
-             t_start_api, t_rest, t_rest_edges, t_ws, t_restart, t_gap_repair, t_reconcile, t_metrics, t_shutdown]
+    steps = [t_migrate, t_tail, t_guard, t_start_indexer, t_snapshot, t_live_data, t_swaps_view, t_jobs,
+             t_start_api, t_rest, t_rest_edges, t_ws, t_frontend, t_restart, t_gap_repair, t_reconcile, t_metrics,
+             t_shutdown]
     if not args.skip_cargo_test:
         steps.insert(0, t_cargo)
     try:

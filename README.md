@@ -44,7 +44,8 @@ stops if the gRPC stream and `RPC_URL` are on different clusters. To go to mainn
 | Anything undecodable | `decode_failures` | dead-letter queue (IDL drift alarm) |
 | Known missing ranges | `gaps` | detected by replay refusal or slot-chain audit; auto-repaired via RPC |
 | Pool reserves / TVL | `token_balances` → `pair_reserves` | from post-tx token balances + snapshot |
-| Token decimals | `mints` | from token balances + snapshot |
+| Token decimals, symbols, logos | `mints` | decimals from balances/snapshot; symbol/logo via DAS job |
+| Rolling 24h pool stats | `pair_stats_24h`, `global_stats_24h` | materialized, refreshed every `STATS_INTERVAL_SECS` |
 
 Decoding is driven by `idl/dlmm.json` at runtime-free cost (parsed once), so an IDL
 update is a file swap: replace `idl/dlmm.json`, rebuild, and rows in `decode_failures`
@@ -124,7 +125,8 @@ bigint-safe JSON parser if you need exact values.
 |---|---|
 | `GET /v1/health` | `ok` (no auth) |
 | `GET /v1/status` | checkpoint, finalized slot, seconds behind, decode failures, gaps, live clients |
-| `GET /v1/pairs?mint=&limit=&offset=` | pairs with price, fee params, decimals |
+| `GET /v1/stats` | network-wide: pools, open positions, 24h swaps / traders / active pools |
+| `GET /v1/pairs?q=&sort=&mint=&limit=&offset=` | pools with price, 24h volume/fees/change, TVL, symbols. `q`: address, symbol or `SOL/USDC`; `sort`: trades, volume, tvl, change, recent |
 | `GET /v1/pairs/{pair}` | one pair + `stats_24h` (trades, volume, fees, unique traders) |
 | `GET /v1/pairs/{pair}/bins?radius=35` or `?from_bin=&to_bin=` | liquidity per bin around the active bin |
 | `GET /v1/pairs/{pair}/swaps?limit=&cursor=` | swaps (amounts, fee, fee %, execution price) |
@@ -176,6 +178,33 @@ GRANT USAGE ON SCHEMA public TO dlmm_api;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO dlmm_api;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dlmm_api;
 ```
+
+## Frontend (`web/` — Binscope)
+
+A React + TypeScript app (Vite) over the API: pool list with 24h stats and search, pool
+pages with live candles, liquidity by price bin and a live trade tape, wallets with their
+positions (range vs. the active bin), positions, and fully decoded transactions. Light and
+dark themes, phone layouts, keyboard access, and a live status indicator.
+
+```bash
+cd web
+npm install
+npm run dev          # http://localhost:5173 — proxies /v1 (REST + WebSocket) to :8080
+npm test             # unit tests (number/price formatting)
+npm run build        # production bundle in web/dist (detail pages are code-split)
+```
+
+For production, serve `web/dist` as a static SPA (fallback to `index.html`) and either proxy
+`/v1` to `dlmm-api` on the same origin, or build with `VITE_API_BASE=https://api.example.com`
+(and `API_CORS_ORIGINS` on the API). `VITE_API_KEY` is embedded in the public bundle, so only
+use a key there that you're happy to be public (rate limits still apply per key).
+
+Design notes: chart colors were validated as a set (all pairs, both themes, colour-vision
+deficiency simulations) with a palette checker; price direction is always shown with ▲/▼ as
+well as colour; tiny prices use DEX subscript notation (`0.0₄4803`); token amounts stay exact
+(u64 strings scaled with BigInt) until display rounding. Token symbols and logos come from the
+indexer's metadata job (DAS `getAssetBatch`); tokens without metadata show a short mint and a
+deterministic mark.
 
 ## Reliability model
 
@@ -250,5 +279,6 @@ shutdown. Report: `target/e2e/report.json`, logs in `target/e2e/`.
 - ~~Week 3: REST/WebSocket API~~ ✅ done (`dlmm-api`). Next: USD prices, token metadata,
   TVL from reserve balances, Timescale continuous aggregates when candle queries get heavy.
 - ~~Week 4: reconciliation, gap repair, dashboards, deploy units~~ ✅ done (Phase 3).
+- ~~Frontend~~ ✅ done (Phase 4: `web/`).
 - Mainnet: USD prices (Jupiter/Pyth), position PnL, Timescale continuous aggregates.
 - Later: historical backfill (Old Faithful) into the same tables; ClickHouse for analytics.

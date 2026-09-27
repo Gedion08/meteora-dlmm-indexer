@@ -21,6 +21,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/health", get(|| async { "ok" }))
         .route("/v1/status", get(status))
+        .route("/v1/stats", get(global_stats))
         .route("/v1/pairs", get(list_pairs))
         .route("/v1/pairs/{address}", get(get_pair))
         .route("/v1/pairs/{address}/bins", get(pair_bins))
@@ -113,17 +114,23 @@ const SWAP_COLS: &str = "
     dlmm_bin_price((e.data->>'end_bin_id')::int, (p.data->>'bin_step')::int) AS price_raw,
     CASE WHEN mx.decimals IS NOT NULL AND my.decimals IS NOT NULL THEN
         dlmm_ui_price((e.data->>'end_bin_id')::int, (p.data->>'bin_step')::int, mx.decimals, my.decimals)
-    END AS price";
+    END AS price,
+    mx.symbol AS symbol_x, my.symbol AS symbol_y, mx.decimals AS decimals_x, my.decimals AS decimals_y,
+    p.data->>'token_x_mint' AS token_x_mint, p.data->>'token_y_mint' AS token_y_mint";
 
 const EVENT_COLS: &str = "
     e.signature, e.slot, e.tx_index, e.ix_index, e.inner_index,
     extract(epoch FROM e.block_time)::bigint AS block_time,
-    e.name, e.lb_pair, e.position, e.wallet, e.data";
+    e.name, e.lb_pair, e.position, e.wallet, e.data,
+    mx.symbol AS symbol_x, my.symbol AS symbol_y, mx.decimals AS decimals_x, my.decimals AS decimals_y,
+    p.data->>'token_x_mint' AS token_x_mint, p.data->>'token_y_mint' AS token_y_mint";
 
 const PAIR_COLS: &str = "
     a.pubkey AS address, a.slot AS updated_slot,
     a.data->>'token_x_mint' AS token_x_mint, a.data->>'token_y_mint' AS token_y_mint,
     mx.decimals AS decimals_x, my.decimals AS decimals_y,
+    mx.symbol AS symbol_x, my.symbol AS symbol_y, mx.name AS name_x, my.name AS name_y,
+    mx.logo_uri AS logo_x, my.logo_uri AS logo_y,
     a.data->>'reserve_x' AS reserve_x, a.data->>'reserve_y' AS reserve_y,
     (a.data->>'bin_step')::int AS bin_step, (a.data->>'active_id')::int AS active_id,
     dlmm_bin_price((a.data->>'active_id')::int, (a.data->>'bin_step')::int) AS price_raw,
@@ -143,7 +150,25 @@ const PAIR_COLS: &str = "
         (rx.amount / power(10::numeric, mx.decimals)
             * dlmm_ui_price((a.data->>'active_id')::int, (a.data->>'bin_step')::int, mx.decimals, my.decimals)::numeric
          + ry.amount / power(10::numeric, my.decimals))::float8
-    END AS tvl_in_y";
+    END AS tvl_in_y,
+    coalesce(s.trades, 0) AS trades_24h, coalesce(s.traders, 0) AS traders_24h,
+    extract(epoch FROM s.last_trade_at)::bigint AS last_trade_at,
+    -- Exact: price ratio between two bins is (1 + bin_step/10^4)^(bin difference).
+    CASE WHEN s.open_bin IS NOT NULL THEN
+        power(1 + (a.data->>'bin_step')::float8 / 10000, (a.data->>'active_id')::int - s.open_bin) - 1
+    END AS price_change_24h,
+    -- Quote-token value of 24h volume / fees, X side converted at the current price.
+    CASE WHEN mx.decimals IS NOT NULL AND my.decimals IS NOT NULL THEN
+        coalesce(s.volume_y / power(10::numeric, my.decimals)
+            + s.volume_x / power(10::numeric, mx.decimals)
+              * dlmm_ui_price((a.data->>'active_id')::int, (a.data->>'bin_step')::int, mx.decimals, my.decimals)::numeric, 0)::float8
+    END AS volume_24h_y,
+    CASE WHEN mx.decimals IS NOT NULL AND my.decimals IS NOT NULL THEN
+        coalesce(s.fees_y / power(10::numeric, my.decimals)
+            + s.fees_x / power(10::numeric, mx.decimals)
+              * dlmm_ui_price((a.data->>'active_id')::int, (a.data->>'bin_step')::int, mx.decimals, my.decimals)::numeric, 0)::float8
+    END AS fees_24h_y,
+    extract(epoch FROM s.computed_at)::bigint AS stats_computed_at";
 
 const PAIR_FROM: &str = "
     FROM accounts a
@@ -151,6 +176,7 @@ const PAIR_FROM: &str = "
     LEFT JOIN mints my ON my.mint = a.data->>'token_y_mint'
     LEFT JOIN token_balances rx ON rx.account = a.data->>'reserve_x'
     LEFT JOIN token_balances ry ON ry.account = a.data->>'reserve_y'
+    LEFT JOIN pair_stats_24h s ON s.lb_pair = a.pubkey
     WHERE a.account_type = 'LbPair' AND a.closed_slot IS NULL";
 
 /// Newest-first keyset page over `events e`, rendered as a JSON array.
@@ -224,7 +250,9 @@ async fn status(State(s): State<AppState>) -> ApiResult<JsonText> {
 pub struct PairsQuery {
     /// Only pairs containing this mint.
     mint: Option<String>,
-    /// `recent` (last updated, default) or `tvl` (TVL in token Y, highest first).
+    /// Search: a pool or mint address, a symbol prefix ("SOL"), or a pair ("SOL/USDC").
+    q: Option<String>,
+    /// `trades` (24h, default), `volume`, `tvl` (both in the quote token), `change` or `recent`.
     sort: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -235,7 +263,7 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
         pubkey(m)?;
     }
     let mut q = QueryBuilder::new(format!(
-        "SELECT coalesce(json_agg(t), '[]')::text FROM (SELECT {PAIR_COLS} {PAIR_FROM}"
+        "SELECT coalesce(json_agg(t ORDER BY t.rn), '[]')::text FROM (SELECT *, row_number() OVER () AS rn FROM (SELECT {PAIR_COLS} {PAIR_FROM}"
     ));
     // (ORDER BY below keeps json_agg in the subquery's order.)
     if let Some(m) = p.mint {
@@ -245,13 +273,58 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
             .push_bind(m)
             .push(")");
     }
-    let order = match p.sort.as_deref().unwrap_or("recent") {
-        "recent" => "a.slot DESC",
+    if let Some(term) = p.q.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if term.len() > 64 {
+            return Err(bad("search term too long"));
+        }
+        if pubkey(term).is_ok() {
+            q.push(" AND (a.pubkey = ")
+                .push_bind(term.to_owned())
+                .push(" OR a.data->>'token_x_mint' = ")
+                .push_bind(term.to_owned())
+                .push(" OR a.data->>'token_y_mint' = ")
+                .push_bind(term.to_owned())
+                .push(")");
+        } else {
+            // Symbol prefixes; "A/B" (or "A-B", "A B") matches the pair in either order.
+            let parts: Vec<String> = term
+                .split(['/', '-', ' '])
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{}%", s.to_lowercase().replace(['%', '_', '\\'], "")))
+                .collect();
+            match parts.as_slice() {
+                [one] => {
+                    q.push(" AND (lower(mx.symbol) LIKE ")
+                        .push_bind(one.clone())
+                        .push(" OR lower(my.symbol) LIKE ")
+                        .push_bind(one.clone())
+                        .push(")");
+                }
+                [a, b, ..] => {
+                    q.push(" AND ((lower(mx.symbol) LIKE ")
+                        .push_bind(a.clone())
+                        .push(" AND lower(my.symbol) LIKE ")
+                        .push_bind(b.clone())
+                        .push(") OR (lower(mx.symbol) LIKE ")
+                        .push_bind(b.clone())
+                        .push(" AND lower(my.symbol) LIKE ")
+                        .push_bind(a.clone())
+                        .push("))");
+                }
+                [] => {}
+            }
+        }
+    }
+    let order = match p.sort.as_deref().unwrap_or("trades") {
+        "trades" => "trades_24h DESC, tvl_in_y DESC NULLS LAST, a.slot DESC",
+        "volume" => "volume_24h_y DESC NULLS LAST, a.slot DESC",
         "tvl" => "tvl_in_y DESC NULLS LAST, a.slot DESC",
-        _ => return Err(bad("sort must be recent or tvl")),
+        "change" => "price_change_24h DESC NULLS LAST, a.slot DESC",
+        "recent" => "a.slot DESC",
+        _ => return Err(bad("sort must be trades, volume, tvl, change or recent")),
     };
     q.push(format!(
-        " ORDER BY {order} LIMIT {} OFFSET {}) t",
+        " ORDER BY {order} LIMIT {} OFFSET {}) ordered) t",
         limit(p.limit, 100, 500),
         p.offset.unwrap_or(0).clamp(0, 1_000_000)
     ));
@@ -379,7 +452,7 @@ async fn pair_events(
     let names = names_filter(&p.names)?;
     let q = events_page(
         EVENT_COLS,
-        "",
+        PAIR_JOINS,
         |q| {
             q.push("e.lb_pair = ").push_bind(address);
             if let Some(n) = names {
@@ -401,7 +474,7 @@ async fn wallet_events(
     let names = names_filter(&p.names)?;
     let q = events_page(
         EVENT_COLS,
-        "",
+        PAIR_JOINS,
         |q| {
             q.push("e.wallet = ").push_bind(wallet);
             if let Some(n) = names {
@@ -498,9 +571,16 @@ const POSITION_SELECT: &str = "
            (a.data->>'last_updated_at')::bigint AS last_updated_at,
            a.trailing_bytes > 0 AS extended,
            p.data->>'token_x_mint' AS token_x_mint, p.data->>'token_y_mint' AS token_y_mint,
+           (p.data->>'active_id')::int AS active_id, (p.data->>'bin_step')::int AS bin_step,
+           pmx.symbol AS symbol_x, pmy.symbol AS symbol_y, pmx.decimals AS decimals_x, pmy.decimals AS decimals_y,
+           CASE WHEN pmx.decimals IS NOT NULL AND pmy.decimals IS NOT NULL THEN
+               dlmm_ui_price((p.data->>'active_id')::int, (p.data->>'bin_step')::int, pmx.decimals, pmy.decimals)
+           END AS price,
            amt.amount_x, amt.amount_y
     FROM accounts a
     LEFT JOIN accounts p ON p.pubkey = a.lb_pair
+    LEFT JOIN mints pmx ON pmx.mint = p.data->>'token_x_mint'
+    LEFT JOIN mints pmy ON pmy.mint = p.data->>'token_y_mint'
     LEFT JOIN LATERAL (
         SELECT floor(sum(CASE WHEN b.liquidity_supply > 0
                     THEN b.amount_x * (a.data->'liquidity_shares'->>(b.bin_id - (a.data->>'lower_bin_id')::int)::int)::numeric / b.liquidity_supply
@@ -564,8 +644,13 @@ async fn get_tx(State(s): State<AppState>, Path(signature): Path<String>) -> Api
                 SELECT ix_index, inner_index, name, invoked_by, lb_pair, wallet, accounts, remaining_accounts, args
                 FROM instructions WHERE slot = t.slot AND signature = t.signature) i),
             'events', (SELECT coalesce(json_agg(e ORDER BY e.ix_index, e.inner_index), '[]') FROM (
-                SELECT ix_index, inner_index, name, lb_pair, position, wallet, data
-                FROM events WHERE slot = t.slot AND signature = t.signature) e),
+                SELECT ev.ix_index, ev.inner_index, ev.name, ev.lb_pair, ev.position, ev.wallet, ev.data,
+                       mx.symbol AS symbol_x, my.symbol AS symbol_y, mx.decimals AS decimals_x, my.decimals AS decimals_y
+                FROM events ev
+                LEFT JOIN accounts p ON p.pubkey = ev.lb_pair
+                LEFT JOIN mints mx ON mx.mint = p.data->>'token_x_mint'
+                LEFT JOIN mints my ON my.mint = p.data->>'token_y_mint'
+                WHERE ev.slot = t.slot AND ev.signature = t.signature) e),
             'token_balances', json_build_object('pre', t.pre_token_balances, 'post', t.post_token_balances)
          )::text
          FROM transactions t WHERE t.signature = $1 LIMIT 1",
@@ -574,4 +659,22 @@ async fn get_tx(State(s): State<AppState>, Path(signature): Path<String>) -> Api
     .fetch_optional(&s.pool)
     .await?;
     text.map(JsonText).ok_or(ApiError::NotFound)
+}
+
+async fn global_stats(State(s): State<AppState>) -> ApiResult<JsonText> {
+    let text: String = sqlx::query_scalar(
+        "SELECT json_build_object(
+            'network', (SELECT value FROM indexer_meta WHERE key = 'network'),
+            'pairs', (SELECT count(*) FROM accounts WHERE account_type = 'LbPair' AND closed_slot IS NULL),
+            'positions', (SELECT count(*) FROM accounts WHERE account_type = 'PositionV2' AND closed_slot IS NULL),
+            'trades_24h', coalesce(g.trades, 0),
+            'traders_24h', coalesce(g.traders, 0),
+            'active_pairs_24h', coalesce(g.active_pairs, 0),
+            'computed_at', extract(epoch FROM g.computed_at)::bigint
+         )::text
+         FROM (SELECT 1) one LEFT JOIN global_stats_24h g ON true",
+    )
+    .fetch_one(&s.pool)
+    .await?;
+    Ok(JsonText(text))
 }

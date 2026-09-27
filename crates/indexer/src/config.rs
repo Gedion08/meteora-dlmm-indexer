@@ -119,4 +119,12 @@ pub struct MaintenanceConfig {
 
     #[arg(long, env = "RECONCILE_SAMPLE", default_value_t = 100)]
     pub reconcile_sample: usize,
+
+    /// Refresh the 24h pool statistics used by the API.
+    #[arg(long, env = "STATS_INTERVAL_SECS", default_value_t = 60)]
+    pub stats_interval_secs: u64,
+
+    /// Look up symbols / names / logos for newly seen token mints (DAS getAssetBatch).
+    #[arg(long, env = "METADATA_INTERVAL_SECS", default_value_t = 30)]
+    pub metadata_interval_secs: u64,
 }
