@@ -93,6 +93,7 @@ impl Store {
             write_batch(&mut tx, b).await?;
         }
         upsert_mints(&mut tx, batches).await?;
+        upsert_token_balances(&mut tx, batches).await?;
         let slots: Vec<u64> = batches
             .iter()
             .filter(|b| !b.events.is_empty() || !b.instructions.is_empty() || !b.accounts.is_empty() || !b.closes.is_empty())
@@ -315,6 +316,75 @@ async fn upsert_mints(tx: &mut Transaction<'_, Postgres>, batches: &[SlotBatch])
         });
         q.push(" ON CONFLICT (mint) DO NOTHING");
         q.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+/// Latest post-transaction balance per token account (reserves, user accounts).
+async fn upsert_token_balances(tx: &mut Transaction<'_, Postgres>, batches: &[SlotBatch]) -> Result<()> {
+    // One row per account (the latest), or Postgres rejects the multi-row upsert.
+    let mut latest: std::collections::BTreeMap<String, (u64, u64, String, Option<String>, String)> = Default::default();
+    for t in batches.iter().flat_map(|b| &b.txs).filter(|t| t.success) {
+        for e in t.post_token_balances.as_array().into_iter().flatten() {
+            let (Some(acc), Some(mint), Some(amount)) =
+                (e["account"].as_str(), e["mint"].as_str(), e["amount"].as_str())
+            else {
+                continue;
+            };
+            let pos = (t.slot, t.tx_index);
+            let newer = latest.get(acc).is_none_or(|v| (v.0, v.1) <= pos);
+            if newer {
+                latest.insert(
+                    acc.to_owned(),
+                    (t.slot, t.tx_index, mint.to_owned(), e["owner"].as_str().map(str::to_owned), amount.to_owned()),
+                );
+            }
+        }
+    }
+    let rows: Vec<_> = latest.into_iter().collect();
+    for chunk in rows.chunks(chunk_size(6)) {
+        let mut q = QueryBuilder::<Postgres>::new(
+            "INSERT INTO token_balances AS b (account, mint, owner, amount, slot, tx_index) ",
+        );
+        q.push_values(chunk, |mut r, (acc, (slot, idx, mint, owner, amount))| {
+            r.push_bind(acc)
+                .push_bind(mint)
+                .push_bind(owner)
+                .push_bind(amount)
+                .push_unseparated("::numeric")
+                .push_bind(*slot as i64)
+                .push_bind(*idx as i32);
+        });
+        q.push(
+            " ON CONFLICT (account) DO UPDATE SET mint = EXCLUDED.mint, owner = EXCLUDED.owner,
+                amount = EXCLUDED.amount, slot = EXCLUDED.slot, tx_index = EXCLUDED.tx_index, updated_at = now()
+              WHERE (EXCLUDED.slot, EXCLUDED.tx_index) >= (b.slot, b.tx_index)",
+        );
+        q.build().execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+pub async fn upsert_snapshot_balances(pool: &sqlx::PgPool, rows: &[(String, String, String, u64, u64)]) -> Result<()> {
+    for chunk in rows.chunks(chunk_size(6)) {
+        let mut q = QueryBuilder::<Postgres>::new(
+            "INSERT INTO token_balances AS b (account, mint, owner, amount, slot, tx_index) ",
+        );
+        q.push_values(chunk, |mut r, (acc, mint, owner, amount, slot)| {
+            r.push_bind(acc)
+                .push_bind(mint)
+                .push_bind(owner)
+                .push_bind(amount.to_string())
+                .push_unseparated("::numeric")
+                .push_bind(*slot as i64)
+                .push_bind(-1i32);
+        });
+        q.push(
+            " ON CONFLICT (account) DO UPDATE SET amount = EXCLUDED.amount, slot = EXCLUDED.slot,
+                tx_index = EXCLUDED.tx_index, updated_at = now()
+              WHERE (EXCLUDED.slot, EXCLUDED.tx_index) > (b.slot, b.tx_index)",
+        );
+        q.build().execute(pool).await?;
     }
     Ok(())
 }

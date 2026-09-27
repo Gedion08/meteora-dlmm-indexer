@@ -43,6 +43,8 @@ struct KeyedAccount {
 struct RpcAccount {
     lamports: u64,
     data: (String, String),
+    #[serde(default)]
+    owner: String,
 }
 
 fn decode_b64(data: &(String, String)) -> Result<Vec<u8>> {
@@ -67,7 +69,8 @@ fn to_rows(
 }
 
 /// Snapshot the given account types (all IDL account types when empty).
-pub async fn run(store: &Store, rpc: &Rpc, types: &[String], page_size: usize) -> Result<()> {
+pub async fn run(store: &Store, rpc: &Rpc, types: &[String], page_size: usize, limit: Option<usize>) -> Result<()> {
+    let page_size = limit.map_or(page_size, |l| page_size.min(l.max(1)));
     let dec = Decoder::bundled();
     let types: Vec<String> = if types.is_empty() {
         dec.account_names().iter().map(|s| s.to_string()).collect()
@@ -113,6 +116,9 @@ pub async fn run(store: &Store, rpc: &Rpc, types: &[String], page_size: usize) -
                 store.insert_failures(&failures).await?;
             }
             tracing::info!(account_type = %ty, total, failed, slot = page.context.slot, "snapshot page");
+            if limit.is_some_and(|l| total >= l) {
+                break;
+            }
             match page.value.pagination_key {
                 Some(k) => pagination_key = Some(k),
                 None => break,
@@ -122,6 +128,7 @@ pub async fn run(store: &Store, rpc: &Rpc, types: &[String], page_size: usize) -
     }
     if types.iter().any(|t| t == "LbPair") {
         fill_mints(store, rpc).await?;
+        fill_reserves(store, rpc).await?;
     }
     Ok(())
 }
@@ -176,8 +183,9 @@ pub async fn fetch_accounts(rpc: &Rpc, pubkeys: &[String]) -> Result<(Vec<Accoun
                 json!([chunk, { "encoding": "base64", "commitment": "confirmed" }]),
             )
             .await?;
+        // Callers may pass any accounts an instruction touched; keep DLMM-owned ones.
         let items = chunk.iter().zip(res.value).filter_map(|(k, acc)| {
-            let acc = acc?;
+            let acc = acc.filter(|a| a.owner == dec.program_id_str())?;
             Some((k.clone(), acc.lamports, decode_b64(&acc.data).ok()?))
         });
         let (r, f) = to_rows(dec, res.context.slot, items);
@@ -185,4 +193,41 @@ pub async fn fetch_accounts(rpc: &Rpc, pubkeys: &[String]) -> Result<(Vec<Accoun
         failures.extend(f);
     }
     Ok((rows, failures))
+}
+
+/// Load reserve balances for pairs we have no transaction-derived balance for yet.
+/// SPL token account layout: mint [0..32], owner [32..64], amount u64 [64..72].
+async fn fill_reserves(store: &Store, rpc: &Rpc) -> Result<()> {
+    let missing: Vec<String> = sqlx::query_scalar(
+        "SELECT r FROM (
+             SELECT data->>'reserve_x' AS r FROM accounts WHERE account_type = 'LbPair' AND closed_slot IS NULL
+             UNION SELECT data->>'reserve_y' FROM accounts WHERE account_type = 'LbPair' AND closed_slot IS NULL) t
+         WHERE r IS NOT NULL AND r NOT IN (SELECT account FROM token_balances)",
+    )
+    .fetch_all(store.pool())
+    .await?;
+    tracing::info!(missing = missing.len(), "fetching pool reserve balances");
+    let mut rows = Vec::new();
+    for chunk in missing.chunks(100) {
+        let res: WithCtx<Vec<Option<MintAccount>>> = rpc
+            .call(
+                "getMultipleAccounts",
+                json!([chunk, { "encoding": "base64", "commitment": "confirmed", "dataSlice": { "offset": 0, "length": 72 } }]),
+            )
+            .await?;
+        for (acc, a) in chunk.iter().zip(res.value) {
+            let Some(bytes) = a.and_then(|a| decode_b64(&a.data).ok()).filter(|b| b.len() == 72) else { continue };
+            let amount = u64::from_le_bytes(bytes[64..72].try_into().expect("8 bytes"));
+            rows.push((
+                acc.clone(),
+                bs58::encode(&bytes[0..32]).into_string(),
+                bs58::encode(&bytes[32..64]).into_string(),
+                amount,
+                res.context.slot,
+            ));
+        }
+    }
+    crate::store::upsert_snapshot_balances(store.pool(), &rows).await?;
+    tracing::info!(reserves = rows.len(), "pool reserves stored");
+    Ok(())
 }

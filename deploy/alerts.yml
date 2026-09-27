@@ -1,4 +1,4 @@
-# Prometheus alerting rules for the indexer.
+# Prometheus alerting rules for the indexer and API.
 groups:
   - name: dlmm-indexer
     rules:
@@ -8,6 +8,10 @@ groups:
         labels: { severity: page }
         annotations:
           summary: "Indexer is {{ $value }} slots behind the chain tip"
+      - alert: DlmmIndexerDown
+        expr: up{job="dlmm-indexer"} == 0
+        for: 1m
+        labels: { severity: page }
       - alert: DlmmIndexerNoSources
         expr: grpc_sources_connected == 0
         for: 30s
@@ -19,7 +23,36 @@ groups:
           summary: "New DLMM decode failures — IDL may have changed (see decode_failures table)"
       - alert: DlmmGapRecorded
         expr: increase(gaps_recorded_total[1h]) > 0
+        labels: { severity: ticket }
+        annotations:
+          summary: "Missing slot range detected; auto-repair runs for gaps up to AUTO_REPAIR_MAX_SLOTS"
+      - alert: DlmmGapNotRepaired
+        expr: increase(gaps_recorded_total[2h]) > increase(gaps_repaired_total[2h])
+        for: 30m
         labels: { severity: page }
+      - alert: DlmmStateDrift
+        expr: increase(reconcile_mismatches_total[1h]) > 5
+        labels: { severity: ticket }
+        annotations:
+          summary: "Reconciliation keeps finding stale accounts — the stream may be dropping account updates"
       - alert: DlmmDbErrors
         expr: increase(db_errors_total[5m]) > 5
         labels: { severity: page }
+      - alert: DlmmSlowDbWrites
+        expr: histogram_quantile(0.95, sum(rate(db_flush_seconds_bucket[5m])) by (le)) > 0.5
+        for: 5m
+        labels: { severity: ticket }
+  - name: dlmm-api
+    rules:
+      - alert: DlmmApiDown
+        expr: up{job="dlmm-api"} == 0
+        for: 1m
+        labels: { severity: page }
+      - alert: DlmmApiErrors
+        expr: sum(rate(api_requests_total{status=~"5.."}[5m])) / sum(rate(api_requests_total[5m])) > 0.02
+        for: 5m
+        labels: { severity: page }
+      - alert: DlmmApiSlow
+        expr: histogram_quantile(0.95, sum(rate(api_request_duration_seconds_bucket[5m])) by (le)) > 0.5
+        for: 10m
+        labels: { severity: ticket }

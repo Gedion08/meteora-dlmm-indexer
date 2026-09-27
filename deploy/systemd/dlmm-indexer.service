@@ -1,0 +1,23 @@
+[Unit]
+Description=Meteora DLMM indexer
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dlmm
+EnvironmentFile=/etc/dlmm/indexer.env
+ExecStart=/usr/local/bin/dlmm-indexer run
+Restart=always
+RestartSec=3
+# SIGTERM triggers a graceful flush; give it time before SIGKILL.
+TimeoutStopSec=30
+KillSignal=SIGTERM
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

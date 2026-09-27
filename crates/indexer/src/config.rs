@@ -102,3 +102,21 @@ pub struct ServerConfig {
     #[arg(long, env = "MAX_READY_LAG_SLOTS", default_value_t = 150)]
     pub max_ready_lag_slots: u64,
 }
+
+/// Background jobs inside `run`. Set an interval to 0 to disable a job.
+#[derive(Debug, Clone, Args)]
+pub struct MaintenanceConfig {
+    /// How often to scan recent slots for holes in the chain.
+    #[arg(long, env = "AUDIT_INTERVAL_SECS", default_value_t = 60)]
+    pub audit_interval_secs: u64,
+
+    /// Gaps up to this many slots are repaired automatically; larger ones need `repair-gaps`.
+    #[arg(long, env = "AUTO_REPAIR_MAX_SLOTS", default_value_t = 20_000)]
+    pub auto_repair_max_slots: u64,
+
+    #[arg(long, env = "RECONCILE_INTERVAL_SECS", default_value_t = 300)]
+    pub reconcile_interval_secs: u64,
+
+    #[arg(long, env = "RECONCILE_SAMPLE", default_value_t = 100)]
+    pub reconcile_sample: usize,
+}

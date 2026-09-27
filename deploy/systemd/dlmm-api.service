@@ -1,0 +1,21 @@
+[Unit]
+Description=Meteora DLMM API (REST + WebSocket)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dlmm
+EnvironmentFile=/etc/dlmm/api.env
+ExecStart=/usr/local/bin/dlmm-api
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

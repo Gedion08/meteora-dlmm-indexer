@@ -50,6 +50,10 @@ pub struct Config {
     #[arg(long, env = "API_MAX_WS_CLIENTS", default_value_t = 1000)]
     pub max_ws_clients: usize,
 
+    /// Prometheus metrics (kept off the public port).
+    #[arg(long, env = "API_METRICS_ADDR", default_value = "0.0.0.0:9101")]
+    pub metrics_addr: SocketAddr,
+
     #[arg(long, env = "LOG_JSON", default_value_t = false)]
     pub log_json: bool,
 }
@@ -91,6 +95,19 @@ async fn main() -> Result<()> {
         .await
         .context("connecting to Postgres")?;
 
+    let prom = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .set_buckets(&[0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0])?
+        .install_recorder()
+        .context("installing metrics recorder")?;
+    metrics::gauge!("api_ws_clients").set(0.0);
+    metrics::counter!("api_ws_lagged_total").increment(0);
+    for kind in ["swap", "event", "pair"] {
+        metrics::counter!("api_ws_messages_sent_total", "type" => kind).increment(0);
+    }
+    let metrics_app = axum::Router::new().route("/metrics", axum::routing::get(move || async move { prom.render() }));
+    let metrics_listener = tokio::net::TcpListener::bind(cfg.metrics_addr).await?;
+    tokio::spawn(async move { axum::serve(metrics_listener, metrics_app).await });
+
     let shutdown = tokio_util::sync::CancellationToken::new();
     let hub = live::Hub::new(cfg.max_ws_clients);
     tokio::spawn(live::run_listener(pool.clone(), hub.clone(), shutdown.clone()));
@@ -113,6 +130,7 @@ async fn main() -> Result<()> {
 
     let app = routes::router(state.clone())
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::guard))
+        .layer(axum::middleware::from_fn(track_metrics))
         .layer(CompressionLayer::new())
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::GATEWAY_TIMEOUT,
@@ -134,4 +152,19 @@ async fn main() -> Result<()> {
         })
         .await?;
     Ok(())
+}
+
+/// Request count and latency per route template (not per raw path, to bound cardinality).
+async fn track_metrics(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| "unmatched".to_owned());
+    let start = std::time::Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16().to_string();
+    metrics::counter!("api_requests_total", "route" => route.clone(), "status" => status).increment(1);
+    metrics::histogram!("api_request_duration_seconds", "route" => route).record(start.elapsed().as_secs_f64());
+    resp
 }

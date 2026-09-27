@@ -128,7 +128,10 @@ pub async fn run_listener(pool: PgPool, hub: Arc<Hub>, shutdown: CancellationTok
                     if slots.is_empty() {
                         continue;
                     }
-                    if let Err(e) = publish(&pool, &hub, &mut seen, &slots).await {
+                    let started = std::time::Instant::now();
+                    let res = publish(&pool, &hub, &mut seen, &slots).await;
+                    metrics::histogram!("api_live_publish_seconds").record(started.elapsed().as_secs_f64());
+                    if let Err(e) = res {
                         tracing::error!(error = %e, "publishing live update failed");
                     }
                 }
@@ -284,7 +287,8 @@ pub async fn ws_handler(State(s): State<AppState>, ws: WebSocketUpgrade) -> Resp
 }
 
 async fn client(socket: WebSocket, hub: Arc<Hub>) {
-    hub.clients.fetch_add(1, Ordering::Relaxed);
+    let n = hub.clients.fetch_add(1, Ordering::Relaxed) + 1;
+    metrics::gauge!("api_ws_clients").set(n as f64);
     let mut rx = hub.tx.subscribe();
     let (mut out, mut inbox) = socket.split();
     let mut subs: HashMap<u32, Sub> = HashMap::new();
@@ -332,11 +336,13 @@ async fn client(socket: WebSocket, hub: Arc<Hub>) {
                                     let kind = match channel { Channel::Swaps => "swap", Channel::Events => "event", Channel::Pairs => "pair" };
                                     let frame = format!(r#"{{"type":"{kind}","sub":{id},"data":{data}}}"#);
                                     out.send(Message::Text(frame.into())).await?;
+                                    metrics::counter!("api_ws_messages_sent_total", "type" => kind).increment(1);
                                 }
                             }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
+                        metrics::counter!("api_ws_lagged_total").increment(1);
                         out.send(Message::Text(format!(r#"{{"type":"lagged","missed":{n}}}"#).into())).await?;
                     }
                     Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -354,7 +360,8 @@ async fn client(socket: WebSocket, hub: Arc<Hub>) {
     if let Err(e) = result {
         tracing::debug!(error = %e, "websocket client closed");
     }
-    hub.clients.fetch_sub(1, Ordering::Relaxed);
+    let n = hub.clients.fetch_sub(1, Ordering::Relaxed) - 1;
+    metrics::gauge!("api_ws_clients").set(n as f64);
 }
 
 fn channel_name(c: Channel) -> &'static str {

@@ -1,0 +1,503 @@
+{
+ "title": "Meteora DLMM indexer",
+ "uid": "dlmm-indexer",
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "10s",
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "tags": [
+  "dlmm",
+  "solana"
+ ],
+ "panels": [
+  {
+   "type": "stat",
+   "title": "Slot lag",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "slot_lag"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Sources connected",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "grpc_sources_connected"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Open decode failures (1h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "increase(decode_failures_total[1h])"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "Gaps recorded (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "increase(gaps_recorded_total[24h])"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "WS clients",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "api_ws_clients"
+    }
+   ]
+  },
+  {
+   "type": "stat",
+   "title": "API p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 0,
+    "w": 4,
+    "h": 4
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.95, sum(rate(api_request_duration_seconds_bucket[5m])) by (le))"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Chain tip vs indexed",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "chain_tip_slot",
+     "legendFormat": "tip"
+    },
+    {
+     "refId": "B",
+     "expr": "indexed_slot",
+     "legendFormat": "indexed"
+    },
+    {
+     "refId": "C",
+     "expr": "finalized_slot",
+     "legendFormat": "finalized"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Stream delay p50/p95",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 4,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.5, sum(rate(grpc_update_delay_seconds_bucket[1m])) by (le))",
+     "legendFormat": "p50"
+    },
+    {
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum(rate(grpc_update_delay_seconds_bucket[1m])) by (le))",
+     "legendFormat": "p95"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Events / s by name",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate(events_total[1m])) by (name)",
+     "legendFormat": "{{name}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Transactions / s",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 12,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate(transactions_total[1m])",
+     "legendFormat": "DLMM"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(transactions_ignored_total[1m])",
+     "legendFormat": "ignored (reference only)"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "DB flush p95 / rows per s",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.95, sum(rate(db_flush_seconds_bucket[1m])) by (le))",
+     "legendFormat": "flush p95 (s)"
+    },
+    {
+     "refId": "B",
+     "expr": "rate(db_rows_written_total[1m])",
+     "legendFormat": "rows/s"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Errors",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 20,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "increase(decode_failures_total[5m])",
+     "legendFormat": "decode failures"
+    },
+    {
+     "refId": "B",
+     "expr": "increase(db_errors_total[5m])",
+     "legendFormat": "db errors"
+    },
+    {
+     "refId": "C",
+     "expr": "increase(grpc_reconnects_total[5m])",
+     "legendFormat": "reconnects"
+    },
+    {
+     "refId": "D",
+     "expr": "increase(rpc_errors_total[5m])",
+     "legendFormat": "rpc errors"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Self-healing",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "increase(gaps_recorded_total[15m])",
+     "legendFormat": "gaps recorded"
+    },
+    {
+     "refId": "B",
+     "expr": "increase(gaps_repaired_total[15m])",
+     "legendFormat": "gaps repaired"
+    },
+    {
+     "refId": "C",
+     "expr": "increase(reconcile_mismatches_total[15m])",
+     "legendFormat": "reconcile mismatches"
+    },
+    {
+     "refId": "D",
+     "expr": "increase(reconcile_checked_total[15m])",
+     "legendFormat": "accounts checked"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "API requests / s by route",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 28,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "sum(rate(api_requests_total[1m])) by (route)",
+     "legendFormat": "{{route}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "API latency p95 by route",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "histogram_quantile(0.95, sum(rate(api_request_duration_seconds_bucket[5m])) by (le, route))",
+     "legendFormat": "{{route}}"
+    }
+   ]
+  },
+  {
+   "type": "timeseries",
+   "title": "Live feed",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 36,
+    "w": 12,
+    "h": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "rate(api_ws_messages_sent_total[1m])",
+     "legendFormat": "ws msgs/s"
+    },
+    {
+     "refId": "B",
+     "expr": "histogram_quantile(0.95, sum(rate(api_live_publish_seconds_bucket[5m])) by (le))",
+     "legendFormat": "publish p95 (s)"
+    }
+   ]
+  }
+ ]
+}

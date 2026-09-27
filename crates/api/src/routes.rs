@@ -137,12 +137,20 @@ const PAIR_COLS: &str = "
     (a.data->>'status')::int AS status, (a.data->>'pair_type')::int AS pair_type,
     (a.data->>'activation_type')::int AS activation_type,
     a.data->>'activation_point' AS activation_point,
-    a.data->>'creator' AS creator, a.data->>'oracle' AS oracle";
+    a.data->>'creator' AS creator, a.data->>'oracle' AS oracle,
+    rx.amount::text AS reserve_x_amount, ry.amount::text AS reserve_y_amount,
+    CASE WHEN mx.decimals IS NOT NULL AND my.decimals IS NOT NULL THEN
+        (rx.amount / power(10::numeric, mx.decimals)
+            * dlmm_ui_price((a.data->>'active_id')::int, (a.data->>'bin_step')::int, mx.decimals, my.decimals)::numeric
+         + ry.amount / power(10::numeric, my.decimals))::float8
+    END AS tvl_in_y";
 
 const PAIR_FROM: &str = "
     FROM accounts a
     LEFT JOIN mints mx ON mx.mint = a.data->>'token_x_mint'
     LEFT JOIN mints my ON my.mint = a.data->>'token_y_mint'
+    LEFT JOIN token_balances rx ON rx.account = a.data->>'reserve_x'
+    LEFT JOIN token_balances ry ON ry.account = a.data->>'reserve_y'
     WHERE a.account_type = 'LbPair' AND a.closed_slot IS NULL";
 
 /// Newest-first keyset page over `events e`, rendered as a JSON array.
@@ -216,6 +224,8 @@ async fn status(State(s): State<AppState>) -> ApiResult<JsonText> {
 pub struct PairsQuery {
     /// Only pairs containing this mint.
     mint: Option<String>,
+    /// `recent` (last updated, default) or `tvl` (TVL in token Y, highest first).
+    sort: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -227,6 +237,7 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
     let mut q = QueryBuilder::new(format!(
         "SELECT coalesce(json_agg(t), '[]')::text FROM (SELECT {PAIR_COLS} {PAIR_FROM}"
     ));
+    // (ORDER BY below keeps json_agg in the subquery's order.)
     if let Some(m) = p.mint {
         q.push(" AND (a.data->>'token_x_mint' = ")
             .push_bind(m.clone())
@@ -234,8 +245,13 @@ async fn list_pairs(State(s): State<AppState>, Query(p): Query<PairsQuery>) -> A
             .push_bind(m)
             .push(")");
     }
+    let order = match p.sort.as_deref().unwrap_or("recent") {
+        "recent" => "a.slot DESC",
+        "tvl" => "tvl_in_y DESC NULLS LAST, a.slot DESC",
+        _ => return Err(bad("sort must be recent or tvl")),
+    };
     q.push(format!(
-        " ORDER BY a.slot DESC LIMIT {} OFFSET {}) t",
+        " ORDER BY {order} LIMIT {} OFFSET {}) t",
         limit(p.limit, 100, 500),
         p.offset.unwrap_or(0).clamp(0, 1_000_000)
     ));

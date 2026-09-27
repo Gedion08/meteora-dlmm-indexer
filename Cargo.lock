@@ -573,6 +573,8 @@ dependencies = [
  "clap",
  "dotenvy",
  "futures",
+ "metrics",
+ "metrics-exporter-prometheus",
  "serde",
  "serde_json",
  "sqlx",

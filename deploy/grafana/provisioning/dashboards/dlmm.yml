@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: dlmm
+    folder: DLMM
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

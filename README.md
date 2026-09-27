@@ -42,7 +42,9 @@ stops if the gRPC stream and `RPC_URL` are on different clusters. To go to mainn
 | Transaction context | `transactions` | fee, CU, signer, token balance deltas |
 | Block times / finality | `slots`, `indexer_state` | |
 | Anything undecodable | `decode_failures` | dead-letter queue (IDL drift alarm) |
-| Known missing ranges | `gaps` | e.g. offline longer than the provider's replay window |
+| Known missing ranges | `gaps` | detected by replay refusal or slot-chain audit; auto-repaired via RPC |
+| Pool reserves / TVL | `token_balances` → `pair_reserves` | from post-tx token balances + snapshot |
+| Token decimals | `mints` | from token balances + snapshot |
 
 Decoding is driven by `idl/dlmm.json` at runtime-free cost (parsed once), so an IDL
 update is a file swap: replace `idl/dlmm.json`, rebuild, and rows in `decode_failures`
@@ -194,24 +196,59 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO dlmm_api;
 
 | Endpoint | Purpose |
 |---|---|
-| `GET :9100/healthz` | liveness (stream messages flowing) |
-| `GET :9100/readyz` | readiness (slot lag ≤ `MAX_READY_LAG_SLOTS`) |
-| `GET :9100/metrics` | Prometheus metrics |
+| indexer `GET :9100/healthz` | liveness (stream messages flowing) |
+| indexer `GET :9100/readyz` | readiness (slot lag ≤ `MAX_READY_LAG_SLOTS`) |
+| indexer `GET :9100/metrics` | Prometheus metrics |
+| API `GET :9101/metrics` | API metrics (requests, latency per route, WebSocket clients) |
 
-Key metrics: `slot_lag`, `grpc_update_delay_seconds`, `db_flush_seconds`,
-`decode_failures_total`, `grpc_reconnects_total`, `gaps_recorded_total`, `events_total{name}`.
-Alert rules: `deploy/alerts.yml`.
+### Self-healing (runs inside `dlmm-indexer run`)
+
+| Job | Default | What it does |
+|---|---|---|
+| Gap audit + repair | every 60 s (`AUDIT_INTERVAL_SECS`) | finds holes in the stored slot chain, re-fetches those blocks with `getBlock`, decodes them with the live extractor, refreshes touched accounts. Gaps up to `AUTO_REPAIR_MAX_SLOTS` (20 000) are repaired automatically. |
+| Reconciliation | every 300 s (`RECONCILE_INTERVAL_SECS`, `RECONCILE_SAMPLE`=100) | compares recently written + random accounts with on-chain state (after the indexer has passed the RPC slot, so in-flight updates aren't false alarms) and overwrites stale or closed ones. |
+
+Manual commands (same code paths):
+
+```bash
+dlmm-indexer audit                     # scan the whole slot chain for holes
+dlmm-indexer repair-gaps               # repair all open gaps, any size
+dlmm-indexer reconcile --sample 500    # or --pubkeys A,B,C
+```
+
+### Monitoring
+
+`docker compose --profile monitoring up -d` starts Prometheus (scraping both services,
+alert rules from `deploy/alerts.yml`) and Grafana on :3000 with the **Meteora DLMM
+indexer** dashboard pre-provisioned (lag, stream delay, events/s, DB latency, errors,
+self-healing activity, API traffic and latency, live feed).
+
+### Deploying without Docker
+
+`deploy/systemd/` has hardened units for both binaries (`EnvironmentFile=/etc/dlmm/*.env`,
+restart on failure, 30 s graceful stop so the indexer flushes). Build release binaries on
+a machine with a stable toolchain (`cargo build --release -p dlmm-indexer -p dlmm-api`),
+copy them to `/usr/local/bin`, then `systemctl enable --now dlmm-indexer dlmm-api`.
 
 ## Tests
 
 ```bash
-cargo test                       # decoder golden tests against real mainnet fixtures
-cargo run --release -- tail --duration-secs 60 --record fixtures/stream.bin   # capture more
+cargo test                         # decoder golden tests (mainnet fixtures), stream replay, RPC conversion
+python3 scripts/e2e.py             # full end-to-end run against the configured network (~10 min)
 ```
+
+The end-to-end suite runs in an isolated `e2e` Postgres schema on separate ports (a dev
+instance can keep running) and checks: migrations, streaming, the network guard, snapshot
+(pairs, decimals, reserves), live data, every REST endpoint, pagination/validation/auth/
+rate limits, WebSocket push, graceful restart without holes, **automatic detection and
+byte-identical repair of a deleted slot range**, **reconciliation healing a corrupted
+account**, that every metric used by the dashboard and alerts is exported, and graceful
+shutdown. Report: `target/e2e/report.json`, logs in `target/e2e/`.
 
 ## Roadmap (not in this MVP)
 
 - ~~Week 3: REST/WebSocket API~~ ✅ done (`dlmm-api`). Next: USD prices, token metadata,
   TVL from reserve balances, Timescale continuous aggregates when candle queries get heavy.
-- Week 4: reconciliation jobs vs. on-chain state, Grafana dashboards, Kubernetes manifests.
+- ~~Week 4: reconciliation, gap repair, dashboards, deploy units~~ ✅ done (Phase 3).
+- Mainnet: USD prices (Jupiter/Pyth), position PnL, Timescale continuous aggregates.
 - Later: historical backfill (Old Faithful) into the same tables; ClickHouse for analytics.

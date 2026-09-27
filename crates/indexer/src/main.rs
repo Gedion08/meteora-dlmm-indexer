@@ -4,6 +4,9 @@ mod extract;
 mod health;
 mod model;
 mod network;
+mod reconcile;
+mod repair;
+mod rpc_block;
 mod rpc;
 mod snapshot;
 mod source;
@@ -22,7 +25,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::assembler::Assembler;
-use crate::config::{DbConfig, RpcConfig, ServerConfig, StreamConfig};
+use crate::config::{DbConfig, MaintenanceConfig, RpcConfig, ServerConfig, StreamConfig};
 use crate::health::Health;
 use crate::source::{build_sources, Checkpoint, SourceMsg};
 
@@ -49,6 +52,8 @@ enum Cmd {
         rpc: RpcConfig,
         #[command(flatten)]
         server: ServerConfig,
+        #[command(flatten)]
+        maintenance: MaintenanceConfig,
     },
     /// Load current state of all DLMM accounts via getProgramAccountsV2.
     Snapshot {
@@ -61,6 +66,42 @@ enum Cmd {
         types: Vec<String>,
         #[arg(long, default_value_t = 1000)]
         page_size: usize,
+        /// Stop after this many accounts per type (sampling / smoke tests).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Scan the stored slot chain for holes and record them as gaps.
+    Audit {
+        #[command(flatten)]
+        db: DbConfig,
+        /// Only check slots above this one (default: everything).
+        #[arg(long, default_value_t = 0)]
+        since_slot: u64,
+    },
+    /// Re-fetch blocks for open gaps via RPC and index them.
+    RepairGaps {
+        #[command(flatten)]
+        db: DbConfig,
+        #[command(flatten)]
+        rpc: RpcConfig,
+        #[arg(long, default_value_t = u64::MAX)]
+        max_slots: u64,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        #[arg(long, env = "INDEX_FAILED_TXS", default_value_t = false)]
+        index_failed_txs: bool,
+    },
+    /// Compare stored accounts with on-chain state and heal drift (needs the indexer running).
+    Reconcile {
+        #[command(flatten)]
+        db: DbConfig,
+        #[command(flatten)]
+        rpc: RpcConfig,
+        #[arg(long, default_value_t = 200)]
+        sample: usize,
+        /// Check these accounts instead of a sample.
+        #[arg(long, value_delimiter = ',')]
+        pubkeys: Vec<String>,
     },
     /// Apply database migrations and exit.
     Migrate {
@@ -131,14 +172,41 @@ async fn main() -> Result<()> {
     );
 
     match cli.cmd {
-        Cmd::Run { stream, db, rpc, server } => run(stream, db, rpc, server).await,
-        Cmd::Snapshot { db, rpc, types, page_size } => {
+        Cmd::Run { stream, db, rpc, server, maintenance } => run(stream, db, rpc, server, maintenance).await,
+        Cmd::Audit { db, since_slot } => {
+            let store = store::Store::connect(&db).await?;
+            store.migrate().await?;
+            let until = store.get_state("checkpoint").await?.unwrap_or(0).saturating_sub(32);
+            let n = repair::audit(&store, since_slot, until).await?;
+            println!("{}", serde_json::json!({ "gaps_recorded": n }));
+            Ok(())
+        }
+        Cmd::RepairGaps { db, rpc, max_slots, concurrency, index_failed_txs } => {
+            let store = store::Store::connect(&db).await?;
+            store.migrate().await?;
+            let rpc = rpc::Rpc::new(rpc.rpc_url)?;
+            network::verify_database(&store, &rpc).await?;
+            let r = repair::repair(&store, &rpc, max_slots, concurrency, index_failed_txs).await?;
+            println!("{}", serde_json::json!({ "gaps_repaired": r.gaps, "blocks": r.blocks,
+                "transactions": r.transactions, "accounts_refreshed": r.accounts_refreshed }));
+            Ok(())
+        }
+        Cmd::Reconcile { db, rpc, sample, pubkeys } => {
+            let store = store::Store::connect(&db).await?;
+            let rpc = rpc::Rpc::new(rpc.rpc_url)?;
+            network::verify_database(&store, &rpc).await?;
+            let r = reconcile::run_once(&store, &rpc, sample, &pubkeys).await?;
+            println!("{}", serde_json::json!({ "checked": r.checked, "matched": r.matched,
+                "skipped_newer": r.skipped_newer, "healed_stale": r.healed_stale, "healed_closed": r.healed_closed }));
+            Ok(())
+        }
+        Cmd::Snapshot { db, rpc, types, page_size, limit } => {
             let store = store::Store::connect(&db).await?;
             store.migrate().await?;
             let rpc = rpc::Rpc::new(rpc.rpc_url)?;
             let net = network::verify_database(&store, &rpc).await?;
             tracing::info!(network = net, "snapshot target verified");
-            snapshot::run(&store, &rpc, &types, page_size).await
+            snapshot::run(&store, &rpc, &types, page_size, limit).await
         }
         Cmd::Migrate { db } => {
             store::Store::connect(&db).await?.migrate().await?;
@@ -151,11 +219,18 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run(stream: StreamConfig, db: DbConfig, rpc_cfg: RpcConfig, server: ServerConfig) -> Result<()> {
+async fn run(
+    stream: StreamConfig,
+    db: DbConfig,
+    rpc_cfg: RpcConfig,
+    server: ServerConfig,
+    maintenance: MaintenanceConfig,
+) -> Result<()> {
     let prom = PrometheusBuilder::new()
         .set_buckets(&[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])?
         .install_recorder()
         .context("installing metrics recorder")?;
+    register_metrics();
     let shutdown = shutdown_signal();
 
     let store = store::Store::connect(&db).await?;
@@ -189,6 +264,8 @@ async fn run(stream: StreamConfig, db: DbConfig, rpc_cfg: RpcConfig, server: Ser
     let assembler = Assembler::new(start, stream.slot_meta_timeout(), health.clone(), w_tx);
     let asm = tokio::spawn(assembler.run(src_rx, shutdown.clone()));
 
+    spawn_maintenance(store.clone(), rpc_client.clone(), maintenance, stream.index_failed_txs, shutdown.clone());
+
     let writer = writer::Writer {
         store,
         rpc: rpc_client,
@@ -212,4 +289,70 @@ async fn run(stream: StreamConfig, db: DbConfig, rpc_cfg: RpcConfig, server: Ser
 
 fn dec_program() -> &'static str {
     Decoder::bundled().program_id_str()
+}
+
+/// Periodic chain-hole audit + small-gap repair, and account reconciliation.
+fn spawn_maintenance(
+    store: store::Store,
+    rpc: rpc::Rpc,
+    cfg: MaintenanceConfig,
+    index_failed: bool,
+    shutdown: CancellationToken,
+) {
+    if cfg.audit_interval_secs > 0 {
+        let (store, rpc, sd) = (store.clone(), rpc.clone(), shutdown.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(cfg.audit_interval_secs));
+            tick.tick().await;
+            loop {
+                tokio::select! { _ = sd.cancelled() => return, _ = tick.tick() => {} }
+                let cp = match store.get_state("checkpoint").await {
+                    Ok(Some(cp)) => cp,
+                    _ => continue,
+                };
+                // Recent window only; `dlmm-indexer audit` checks the whole history.
+                let until = cp.saturating_sub(32);
+                if let Err(e) = repair::audit(&store, until.saturating_sub(20_000), until).await {
+                    tracing::error!(error = format!("{e:#}"), "gap audit failed");
+                }
+                match repair::repair(&store, &rpc, cfg.auto_repair_max_slots, 4, index_failed).await {
+                    Ok(r) if r.gaps > 0 => tracing::info!(gaps = r.gaps, blocks = r.blocks,
+                        transactions = r.transactions, "gaps repaired automatically"),
+                    Ok(_) => {}
+                    Err(e) => tracing::error!(error = format!("{e:#}"), "gap repair failed"),
+                }
+            }
+        });
+    }
+    if cfg.reconcile_interval_secs > 0 {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(cfg.reconcile_interval_secs));
+            tick.tick().await;
+            loop {
+                tokio::select! { _ = shutdown.cancelled() => return, _ = tick.tick() => {} }
+                match reconcile::run_once(&store, &rpc, cfg.reconcile_sample, &[]).await {
+                    Ok(r) => tracing::info!(checked = r.checked, matched = r.matched,
+                        healed_stale = r.healed_stale, healed_closed = r.healed_closed, "reconciliation pass"),
+                    Err(e) => tracing::error!(error = format!("{e:#}"), "reconciliation failed"),
+                }
+            }
+        });
+    }
+}
+
+/// Export error/self-healing counters at 0 from the start, so dashboards show 0 rather
+/// than "no data" and `increase()` alerts work before the first event.
+fn register_metrics() {
+    for name in [
+        "transactions_total", "transactions_ignored_total", "db_errors_total", "db_rows_written_total",
+        "gaps_recorded_total", "gaps_repaired_total", "reconcile_checked_total", "dead_slots_total",
+    ] {
+        metrics::counter!(name).increment(0);
+    }
+    for kind in ["instruction", "event", "account"] {
+        metrics::counter!("decode_failures_total", "kind" => kind).increment(0);
+    }
+    for kind in ["stale", "closed"] {
+        metrics::counter!("reconcile_mismatches_total", "kind" => kind).increment(0);
+    }
 }

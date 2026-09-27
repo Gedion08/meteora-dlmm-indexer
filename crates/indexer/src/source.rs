@@ -106,6 +106,7 @@ impl Source {
 
     pub async fn run(self, tx: mpsc::Sender<SourceMsg>, shutdown: CancellationToken) {
         let label = self.label();
+        metrics::counter!("grpc_reconnects_total", "source" => label.clone()).increment(0);
         let mut backoff = Duration::from_millis(250);
         let mut use_replay = true;
         loop {
