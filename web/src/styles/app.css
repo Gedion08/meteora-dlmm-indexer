@@ -966,3 +966,40 @@ table.table {
     font-size: var(--t-xl);
   }
 }
+
+/* ---------- data-completeness banner ---------- */
+.gap-banner {
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+}
+.gap-banner__inner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 8px var(--gutter);
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--t-xs);
+  color: var(--ink-2);
+  flex-wrap: wrap;
+}
+.gap-banner__inner strong {
+  color: var(--ink);
+}
+.gap-banner__icon {
+  color: var(--warning);
+  flex: none;
+}
+.gap-banner__bar {
+  flex: 0 0 120px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+  margin-left: auto;
+}
+.gap-banner__bar > span {
+  display: block;
+  height: 100%;
+  background: var(--warning);
+}

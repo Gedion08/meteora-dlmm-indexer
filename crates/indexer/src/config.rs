@@ -110,7 +110,8 @@ pub struct MaintenanceConfig {
     #[arg(long, env = "AUDIT_INTERVAL_SECS", default_value_t = 60)]
     pub audit_interval_secs: u64,
 
-    /// Gaps up to this many slots are repaired automatically; larger ones need `repair-gaps`.
+    /// Gaps up to this many slots are repaired block by block; larger ones are repaired by
+    /// fetching only the blocks that contain DLMM transactions.
     #[arg(long, env = "AUTO_REPAIR_MAX_SLOTS", default_value_t = 20_000)]
     pub auto_repair_max_slots: u64,
 

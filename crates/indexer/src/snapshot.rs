@@ -231,3 +231,45 @@ async fn fill_reserves(store: &Store, rpc: &Rpc) -> Result<()> {
     tracing::info!(reserves = rows.len(), "pool reserves stored");
     Ok(())
 }
+
+/// All accounts of one type matching extra memcmp filters `(offset, base58 pubkey)`,
+/// paginated with getProgramAccountsV2. Used for targeted (on-demand) loads.
+pub async fn fetch_program_accounts(
+    rpc: &Rpc,
+    disc: &[u8; 8],
+    filters: &[(usize, &str)],
+    page_size: usize,
+) -> Result<(Vec<AccountRow>, Vec<DecodeFailure>)> {
+    let dec = Decoder::bundled();
+    let mut memcmp = vec![json!({ "memcmp": { "offset": 0, "bytes": bs58::encode(disc).into_string() } })];
+    memcmp.extend(filters.iter().map(|(o, k)| json!({ "memcmp": { "offset": o, "bytes": k } })));
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+    let mut pagination_key: Option<String> = None;
+    loop {
+        let mut cfg = json!({
+            "encoding": "base64", "commitment": "confirmed", "withContext": true,
+            "limit": page_size, "filters": memcmp,
+        });
+        if let Some(k) = &pagination_key {
+            cfg["paginationKey"] = json!(k);
+        }
+        let page: WithCtx<Page> = rpc.call("getProgramAccountsV2", json!([dec.program_id_str(), cfg])).await?;
+        if page.value.accounts.is_empty() {
+            break;
+        }
+        let items = page
+            .value
+            .accounts
+            .into_iter()
+            .filter_map(|a| Some((a.pubkey, a.account.lamports, decode_b64(&a.account.data).ok()?)));
+        let (r, f) = to_rows(dec, page.context.slot, items);
+        rows.extend(r);
+        failures.extend(f);
+        match page.value.pagination_key {
+            Some(k) => pagination_key = Some(k),
+            None => break,
+        }
+    }
+    Ok((rows, failures))
+}

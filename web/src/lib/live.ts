@@ -143,6 +143,14 @@ class LiveClient {
     };
   }
 
+  /** Skip the remaining backoff (e.g. the API just answered a REST call again). */
+  reconnectNow() {
+    if (this.ws || !this.timer) return;
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.connect();
+  }
+
   /** Keep a connection open for the status indicator even with no subscriptions. */
   ensureConnected() {
     this.keepAlive = true;

@@ -2,6 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Link, Outlet, Route, Routes, useLocation } from "react-router";
 import { Suspense, lazy, useEffect } from "react";
 import { EmptyState } from "./components/bits";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { GapBanner } from "./components/GapBanner";
 import { TopBar } from "./components/TopBar";
 import { PoolsPage } from "./pages/PoolsPage";
 
@@ -32,14 +34,19 @@ function ScrollToTop() {
 }
 
 function Layout() {
+  const { pathname } = useLocation();
   return (
     <>
       <ScrollToTop />
       <TopBar />
+      <GapBanner />
       <main className="page" id="main">
-        <Suspense fallback={<span className="skeleton" style={{ height: 240 }} aria-label="Loading" />}>
-          <Outlet />
-        </Suspense>
+        {/* Keyed by path: navigating away from a crashed page recovers. */}
+        <ErrorBoundary key={pathname}>
+          <Suspense fallback={<span className="skeleton" style={{ height: 240 }} aria-label="Loading" />}>
+            <Outlet />
+          </Suspense>
+        </ErrorBoundary>
       </main>
       <footer className="footer">
         <span>Binscope · live index of the Meteora DLMM program</span>

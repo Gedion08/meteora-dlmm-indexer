@@ -278,6 +278,7 @@ def t_rest():
         f"/v1/wallets/{owner}/positions": ["address", "amount_x", "amount_y", "active_id", "bin_step", "symbol_x"],
         f"/v1/positions/{pos}": ["owner", "amount_x", "events"],
         f"/v1/tx/{sig}": ["instructions", "events", "token_balances"],
+        f"/v1/resolve/{pair}": ["kind"],
     }
     for path, keys in expect.items():
         code, body = http(path)
@@ -296,7 +297,14 @@ def t_rest():
     assert len(exact) == 1 and exact[0]["address"] == pair, "address search"
     sol = http("/v1/pairs?q=SOL&limit=20")[1]
     assert sol and all("sol" in ((p["symbol_x"] or "") + (p["symbol_y"] or "")).lower() for p in sol), "symbol search"
-    return f"{len(expect)} endpoints; sorts and search verified"
+    kinds = {pair: "pool", pos: "position", owner: "wallet", sig: "tx"}
+    mint = sql1("SELECT mint FROM mints LIMIT 1")
+    kinds[mint] = "token"
+    for addr, want in kinds.items():
+        got = http(f"/v1/resolve/{addr}")[1].get("kind")
+        assert got == want, f"resolve {addr[:8]}: {got} != {want}"
+    assert "gaps" in http("/v1/status")[1], "status lacks gaps"
+    return f"{len(expect)} endpoints; sorts, search and resolve verified"
 
 
 @check("REST: pagination, validation, 404, auth, rate limit")
@@ -438,6 +446,23 @@ def t_metrics():
     return f"{len(used)} referenced metrics OK; slot_lag={lag:.0f}"
 
 
+@check("on-demand hydration: a never-loaded pool's bins arrive via /v1/hydrate")
+def t_hydrate():
+    pool = pick("""SELECT r.lb_pair FROM pair_rank r WHERE r.tvl_in_y > 0
+                   AND NOT EXISTS (SELECT 1 FROM accounts b WHERE b.account_type = 'BinArray' AND b.lb_pair = r.lb_pair)
+                   ORDER BY r.tvl_in_y DESC LIMIT 1""")
+    before = len(http(f"/v1/pairs/{pool}/bins?radius=350")[1]["bins"])
+    first = http(f"/v1/hydrate?pair={pool}")[1]
+    assert first["state"] == "pending", first
+    done = wait_for(lambda: (r := http(f"/v1/hydrate?pair={pool}")[1])["state"] == "done" and r, 90, "hydration")
+    after = len(http(f"/v1/pairs/{pool}/bins?radius=350")[1]["bins"])
+    assert done["accounts"] > 0 and after > before, (done, before, after)
+    owner = pick("SELECT owner_wallet FROM accounts WHERE account_type = 'PositionV2' LIMIT 1")
+    wait_for(lambda: http(f"/v1/hydrate?owner={owner}")[1]["state"] == "done", 90, "owner hydration")
+    assert http("/v1/hydrate?pair=not-an-address")[0] == 400
+    return f"pool {pool[:8]}…: {before} → {after} bins ({done['accounts']} accounts); wallet hydration done"
+
+
 WEB = ROOT / "web"
 
 
@@ -474,6 +499,35 @@ def t_shutdown():
     return "both exited 0"
 
 
+@check("signature-mode gap repair resumes an interrupted run and restores data exactly")
+def t_gap_repair_signatures():
+    # Indexer is stopped here, so the background repair job can't race this run.
+    top = int(pick("SELECT max(slot) FROM transactions"))
+    rows = sql("SELECT DISTINCT slot FROM transactions WHERE slot < %d ORDER BY slot DESC LIMIT 6" % (top - 200)).split()
+    assert len(rows) >= 4, "need several slots with DLMM transactions"
+    slots_desc = [int(x) for x in rows]
+    a, b = slots_desc[-1], slots_desc[0]  # exactly the sampled slots, nothing unsampled inside
+    mid = slots_desc[2]  # pretend an earlier run already finished [mid, b]
+    lower = [x for x in slots_desc if x < mid]
+    fp = FP.replace("FROM slots WHERE slot BETWEEN {a} AND {b}",
+                    "FROM slots WHERE slot BETWEEN {a} AND {b} AND slot IN (SELECT slot FROM transactions)")
+    before = sql1(fp.format(a=a, b=b))
+    sql(f"""DELETE FROM events WHERE slot >= {a} AND slot < {mid};
+            DELETE FROM instructions WHERE slot >= {a} AND slot < {mid};
+            DELETE FROM transactions WHERE slot >= {a} AND slot < {mid};
+            DELETE FROM slots WHERE slot >= {a} AND slot < {mid};
+            UPDATE gaps SET repaired_at = now() WHERE repaired_at IS NULL;
+            INSERT INTO gaps (from_slot, to_slot, reason, progress_slot) VALUES ({a}, {b}, 'e2e signatures', {mid});""")
+    r = run_bin(["dlmm-indexer", "repair-gaps", "--mode", "signatures"], timeout=600)
+    assert r.returncode == 0, redact(r.stderr[-800:])
+    report = json.loads(r.stdout.strip().splitlines()[-1])
+    after = sql1(fp.format(a=a, b=b))
+    assert before == after, "restored data differs"
+    # Fetched the missing half, and strictly less than the whole window: the done half was skipped.
+    assert report["gaps_repaired"] == 1 and len(lower) <= report["blocks"] < len(slots_desc), (report, lower)
+    return f"resumed at slot {mid}: fetched {report['blocks']} block(s) for the missing half only; data byte-identical"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--skip-cargo-test", action="store_true")
@@ -481,8 +535,8 @@ def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     print(f"E2E against {ENV['GRPC_ENDPOINTS'].split('//')[-1]} — schema e2e, logs in {LOGS}\n", flush=True)
     steps = [t_migrate, t_tail, t_guard, t_start_indexer, t_snapshot, t_live_data, t_swaps_view, t_jobs,
-             t_start_api, t_rest, t_rest_edges, t_ws, t_frontend, t_restart, t_gap_repair, t_reconcile, t_metrics,
-             t_shutdown]
+             t_start_api, t_rest, t_rest_edges, t_ws, t_hydrate, t_frontend, t_restart, t_gap_repair, t_reconcile,
+             t_metrics, t_shutdown, t_gap_repair_signatures]
     if not args.skip_cargo_test:
         steps.insert(0, t_cargo)
     try:

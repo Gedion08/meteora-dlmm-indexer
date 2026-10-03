@@ -2,6 +2,7 @@ mod assembler;
 mod config;
 mod extract;
 mod health;
+mod hydrate;
 mod metadata;
 mod model;
 mod network;
@@ -85,8 +86,11 @@ enum Cmd {
         db: DbConfig,
         #[command(flatten)]
         rpc: RpcConfig,
-        #[arg(long, default_value_t = u64::MAX)]
-        max_slots: u64,
+        /// blocks | signatures | auto (blocks up to --max-block-slots, signatures beyond).
+        #[arg(long, value_enum, default_value = "auto")]
+        mode: repair::RepairMode,
+        #[arg(long, default_value_t = 20_000)]
+        max_block_slots: u64,
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
         #[arg(long, env = "INDEX_FAILED_TXS", default_value_t = false)]
@@ -182,12 +186,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::json!({ "gaps_recorded": n }));
             Ok(())
         }
-        Cmd::RepairGaps { db, rpc, max_slots, concurrency, index_failed_txs } => {
+        Cmd::RepairGaps { db, rpc, mode, max_block_slots, concurrency, index_failed_txs } => {
             let store = store::Store::connect(&db).await?;
             store.migrate().await?;
             let rpc = rpc::Rpc::new(rpc.rpc_url)?;
             network::verify_database(&store, &rpc).await?;
-            let r = repair::repair(&store, &rpc, max_slots, concurrency, index_failed_txs).await?;
+            let opts = repair::RepairOptions { mode, max_block_slots, concurrency, index_failed: index_failed_txs };
+            let r = repair::repair(&store, &rpc, &opts).await?;
             println!("{}", serde_json::json!({ "gaps_repaired": r.gaps, "blocks": r.blocks,
                 "transactions": r.transactions, "accounts_refreshed": r.accounts_refreshed }));
             Ok(())
@@ -266,6 +271,7 @@ async fn run(
     let asm = tokio::spawn(assembler.run(src_rx, shutdown.clone()));
 
     spawn_maintenance(store.clone(), rpc_client.clone(), maintenance, stream.index_failed_txs, shutdown.clone());
+    hydrate::spawn(store.clone(), rpc_client.clone(), shutdown.clone());
 
     let writer = writer::Writer {
         store,
@@ -316,7 +322,13 @@ fn spawn_maintenance(
                 if let Err(e) = repair::audit(&store, until.saturating_sub(20_000), until).await {
                     tracing::error!(error = format!("{e:#}"), "gap audit failed");
                 }
-                match repair::repair(&store, &rpc, cfg.auto_repair_max_slots, 4, index_failed).await {
+                let opts = repair::RepairOptions {
+                    mode: repair::RepairMode::Auto,
+                    max_block_slots: cfg.auto_repair_max_slots,
+                    concurrency: 4,
+                    index_failed,
+                };
+                match repair::repair(&store, &rpc, &opts).await {
                     Ok(r) if r.gaps > 0 => tracing::info!(gaps = r.gaps, blocks = r.blocks,
                         transactions = r.transactions, "gaps repaired automatically"),
                     Ok(_) => {}
@@ -383,6 +395,9 @@ fn register_metrics() {
         "token_metadata_checked_total",
     ] {
         metrics::counter!(name).increment(0);
+    }
+    for kind in ["pair", "owner"] {
+        metrics::counter!("hydrations_total", "kind" => kind).increment(0);
     }
     for kind in ["instruction", "event", "account"] {
         metrics::counter!("decode_failures_total", "kind" => kind).increment(0);

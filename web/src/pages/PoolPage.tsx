@@ -8,6 +8,7 @@ import { TradeFeed, labels, side, tradeAmounts } from "../components/trades";
 import { api, endpoints, type Bin, type Candle, type CandleInterval, type DlmmEvent, type Pair, type Swap } from "../lib/api";
 import { amount, compact, int, price as fmtPrice, rawToNumber } from "../lib/format";
 import { useLive, useResync } from "../lib/live";
+import { useHydration } from "../lib/useHydration";
 import { eventAmounts, eventLabel } from "../lib/events";
 import { tokenLabel } from "../lib/tokens";
 
@@ -58,6 +59,7 @@ export function PoolPage() {
     queryFn: ({ signal }) => api<{ active_id: number; bins: Bin[] }>(endpoints.bins(address, Number(radius)), signal),
     placeholderData: keepPreviousData,
   });
+  const hydration = useHydration("pair", address, [["bins", address], ["pair", address]]);
   const initialTape = useQuery({
     queryKey: ["tape", address],
     queryFn: ({ signal }) => api<Swap[]>(endpoints.swaps(address, undefined, 40), signal),
@@ -187,7 +189,16 @@ export function PoolPage() {
               {candles.isError ? (
                 <ErrorState error={candles.error} onRetry={() => candles.refetch()} />
               ) : candles.data && candles.data.candles.length === 0 ? (
-                <EmptyState title="No trades in this window">Pick a longer interval to see earlier activity.</EmptyState>
+                <div className="state">
+                  <h3>No trades in this window</h3>
+                  {interval !== "1d" ? (
+                    <button type="button" className="btn" onClick={() => setCandleInterval("1d")}>
+                      Show daily candles
+                    </button>
+                  ) : (
+                    <p>This pool has no recorded trades yet.</p>
+                  )}
+                </div>
               ) : (
                 <CandleChart
                   candles={candles.data?.candles ?? []}
@@ -231,6 +242,11 @@ export function PoolPage() {
                 <ErrorState error={bins.error} onRetry={() => bins.refetch()} />
               ) : !bins.data || !p ? (
                 <span className="skeleton" style={{ height: 220 }} />
+              ) : hydration.pending && bins.data.bins.length === 0 ? (
+                <div className="state" role="status">
+                  <span className="skeleton" style={{ width: 160 }} />
+                  <p>Loading this pool's liquidity from the chain…</p>
+                </div>
               ) : binView === "chart" ? (
                 <LiquidityChart
                   bins={bins.data.bins}

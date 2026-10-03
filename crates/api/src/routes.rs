@@ -22,6 +22,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/health", get(|| async { "ok" }))
         .route("/v1/status", get(status))
         .route("/v1/stats", get(global_stats))
+        .route("/v1/hydrate", get(hydrate))
+        .route("/v1/resolve/{id}", get(resolve))
         .route("/v1/pairs", get(list_pairs))
         .route("/v1/pairs/{address}", get(get_pair))
         .route("/v1/pairs/{address}/bins", get(pair_bins))
@@ -245,6 +247,17 @@ async fn status(State(s): State<AppState>) -> ApiResult<JsonText> {
                                WHERE slot > (SELECT max(slot) - 500 FROM slots)),
             'decode_failures_24h', (SELECT count(*) FROM decode_failures WHERE created_at > now() - interval '1 day'),
             'open_gaps', (SELECT count(*) FROM gaps WHERE repaired_at IS NULL),
+            -- Missing ranges still being recovered, with their wall-clock window.
+            'gaps', (SELECT coalesce(json_agg(json_build_object(
+                    'from_slot', g.from_slot, 'to_slot', g.to_slot,
+                    'from_time', (SELECT extract(epoch FROM block_time)::bigint FROM slots
+                                  WHERE slot < g.from_slot AND block_time IS NOT NULL ORDER BY slot DESC LIMIT 1),
+                    'to_time', (SELECT extract(epoch FROM block_time)::bigint FROM slots
+                                WHERE slot > g.to_slot AND block_time IS NOT NULL ORDER BY slot LIMIT 1),
+                    'progress', CASE WHEN g.progress_slot IS NULL THEN 0
+                                ELSE round((g.to_slot - g.progress_slot + 1)::numeric / (g.to_slot - g.from_slot + 1), 4) END)
+                    ORDER BY g.from_slot), '[]')
+                FROM gaps g WHERE g.repaired_at IS NULL),
             'live_clients', $1::int
          )::text",
     )
@@ -689,4 +702,71 @@ async fn global_stats(State(s): State<AppState>) -> ApiResult<JsonText> {
     .fetch_one(&s.pool)
     .await?;
     Ok(JsonText(text))
+}
+
+#[derive(Deserialize)]
+pub struct HydrateQuery {
+    pair: Option<String>,
+    owner: Option<String>,
+}
+
+/// Ensure a pool's bin arrays/positions (or a wallet's positions) have been loaded from the
+/// chain. Asks the indexer via NOTIFY when they never were (or are over an hour old) and
+/// reports `pending` until it finishes. The API itself stays read-only.
+async fn hydrate(State(s): State<AppState>, Query(h): Query<HydrateQuery>) -> ApiResult<JsonText> {
+    let (kind, key) = match (h.pair, h.owner) {
+        (Some(p), None) => ("pair", p),
+        (None, Some(o)) => ("owner", o),
+        _ => return Err(bad("pass exactly one of pair or owner")),
+    };
+    pubkey(&key)?;
+    let row: Option<(i64, i32, bool)> = sqlx::query_as(
+        "SELECT extract(epoch FROM completed_at)::bigint, accounts, completed_at < now() - interval '1 hour'
+         FROM hydrations WHERE kind = $1 AND key = $2",
+    )
+    .bind(kind)
+    .bind(&key)
+    .fetch_optional(&s.pool)
+    .await?;
+    if row.as_ref().is_none_or(|r| r.2) {
+        sqlx::query("SELECT pg_notify('dlmm_hydrate', $1)")
+            .bind(format!("{kind}:{key}"))
+            .execute(&s.pool)
+            .await?;
+    }
+    let body = match row {
+        Some((at, n, _)) => serde_json::json!({ "state": "done", "completed_at": at, "accounts": n }),
+        None => serde_json::json!({ "state": "pending" }),
+    };
+    Ok(JsonText(body.to_string()))
+}
+
+/// What is this address? One lookup for the search box: a transaction signature, a pool,
+/// a position, a token mint (pools that trade it), or otherwise a wallet.
+async fn resolve(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<JsonText> {
+    let kind: &str = if base58(&id, 64, 90, "signature").is_ok() {
+        "tx"
+    } else {
+        pubkey(&id)?;
+        let t: Option<String> = sqlx::query_scalar(
+            "SELECT CASE account_type WHEN 'LbPair' THEN 'pool' WHEN 'PositionV2' THEN 'position' END
+             FROM accounts WHERE pubkey = $1 AND account_type IN ('LbPair', 'PositionV2')",
+        )
+        .bind(&id)
+        .fetch_optional(&s.pool)
+        .await?
+        .flatten();
+        match t {
+            Some(k) if k == "pool" => "pool",
+            Some(_) => "position",
+            None => {
+                let is_mint: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mints WHERE mint = $1)")
+                    .bind(&id)
+                    .fetch_one(&s.pool)
+                    .await?;
+                if is_mint { "token" } else { "wallet" }
+            }
+        }
+    };
+    Ok(JsonText(serde_json::json!({ "kind": kind, "id": id }).to_string()))
 }

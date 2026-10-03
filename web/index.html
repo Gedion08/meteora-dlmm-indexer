@@ -6,13 +6,32 @@
     <meta name="color-scheme" content="dark light" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Binscope</title>
+    <style>
+      html { background: #f2f4f7; color: #0e1621; }
+      html[data-theme="dark"] { background: #0e1318; color: #e7ecf1; }
+      @media (prefers-color-scheme: dark) { html:not([data-theme="light"]) { background: #0e1318; color: #e7ecf1; } }
+      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .boot__bar { height: 56px; border-bottom: 1px solid rgba(128,140,155,.25); display: flex; align-items: center; padding: 0 24px; }
+      .boot__brand { font-weight: 650; font-size: 16px; letter-spacing: -.02em; }
+      .boot__page { max-width: 1440px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }
+      .boot__page span { display: block; height: 14px; border-radius: 4px; background: rgba(128,140,155,.16); }
+      .boot__page span:nth-child(1) { width: 180px; height: 28px; }
+      .boot__page span:nth-child(2) { width: min(560px, 90%); }
+      .boot__page span:nth-child(3) { height: 240px; }
+    </style>
     <script>
       // Apply the saved theme before first paint (no flash).
       try { var t = localStorage.getItem("binscope-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
     </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- First paint before the app loads; React replaces it on mount. -->
+      <div class="boot" aria-hidden="true">
+        <div class="boot__bar"><span class="boot__brand">Binscope</span></div>
+        <div class="boot__page"><span></span><span></span><span></span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

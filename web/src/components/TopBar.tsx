@@ -9,21 +9,24 @@ const B58 = /^[1-9A-HJ-NP-Za-km-z]+$/;
 
 async function resolve(term: string): Promise<string> {
   const t = term.trim();
-  if (B58.test(t) && t.length >= 64 && t.length <= 90) return `/tx/${t}`;
-  if (B58.test(t) && t.length >= 32 && t.length <= 44) {
+  if (B58.test(t) && t.length >= 32 && t.length <= 90) {
     try {
-      await api(endpoints.pair(t));
-      return `/pool/${t}`;
+      const r = await api<{ kind: string }>(`/v1/resolve/${t}`);
+      switch (r.kind) {
+        case "tx":
+          return `/tx/${t}`;
+        case "pool":
+          return `/pool/${t}`;
+        case "position":
+          return `/position/${t}`;
+        case "token":
+          return `/?q=${t}`; // pools that trade this token
+        default:
+          return `/wallet/${t}`;
+      }
     } catch {
-      /* not a pool */
+      /* not an address after all: fall through to a text search */
     }
-    try {
-      await api(endpoints.position(t));
-      return `/position/${t}`;
-    } catch {
-      /* not a position */
-    }
-    return `/wallet/${t}`;
   }
   return `/?q=${encodeURIComponent(t)}`;
 }
@@ -98,6 +101,10 @@ function StatusPill() {
     queryFn: ({ signal }) => api<GlobalStats>(endpoints.stats(), signal),
     staleTime: 60_000,
   });
+  // The API is answering again: don't wait out the WebSocket backoff.
+  useEffect(() => {
+    if (status.isSuccess && ws === "offline") live.reconnectNow();
+  }, [status.isSuccess, status.dataUpdatedAt, ws]);
   const network = stats.data?.network ?? "…";
   const behind = status.data?.seconds_behind ?? null;
 
