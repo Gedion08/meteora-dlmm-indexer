@@ -64,6 +64,8 @@ export function CandleChart({ candles, intervalSecs, decimalsY, quoteLabel, tick
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
+        // Few candles shouldn't each stretch across half the chart.
+        maxBarSpacing: 18,
         tickMarkFormatter: (t: Time) => {
           const d = new Date((t as number) * 1000);
           return intervalSecs >= 86400

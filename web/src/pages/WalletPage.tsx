@@ -7,6 +7,7 @@ import { api, endpoints, type DlmmEvent, type Position, type Swap } from "../lib
 import { eventAmounts, eventLabel } from "../lib/events";
 import { amount, price as fmtPrice } from "../lib/format";
 import { useLive } from "../lib/live";
+import { useHydration } from "../lib/useHydration";
 import { tokenLabel } from "../lib/tokens";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -28,6 +29,7 @@ export function WalletPage() {
     qc.invalidateQueries({ queryKey: ["wallet-events", address] });
   });
 
+  const hydration = useHydration("owner", address, [["wallet-positions", address]]);
   const rows = positions.data ?? [];
   return (
     <>
@@ -60,8 +62,13 @@ export function WalletPage() {
       >
         {positions.isError ? (
           <ErrorState error={positions.error} onRetry={() => positions.refetch()} />
+        ) : hydration.pending && rows.length === 0 ? (
+          <div className="state" role="status">
+            <span className="skeleton" style={{ width: 160 }} />
+            <p>Checking the chain for this wallet's positions…</p>
+          </div>
         ) : !positions.isLoading && rows.length === 0 ? (
-          <EmptyState title="No positions">This wallet has no DLMM liquidity positions in the index.</EmptyState>
+          <EmptyState title="No positions">This wallet has no open DLMM liquidity positions.</EmptyState>
         ) : (
           <div className="table-wrap">
             <table className="table">
@@ -112,7 +119,7 @@ export function WalletPage() {
       </Panel>
 
       <section className="panel">
-        <div className="tabs" role="tablist" aria-label="Wallet history">
+        <div className="tabs" role="tablist" aria-label="Wallet activity history">
           <button type="button" role="tab" aria-selected={tab === "swaps"} onClick={() => setTab("swaps")}>
             Swaps
           </button>

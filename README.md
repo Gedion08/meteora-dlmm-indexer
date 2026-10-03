@@ -125,8 +125,10 @@ bigint-safe JSON parser if you need exact values.
 | Endpoint | Returns |
 |---|---|
 | `GET /v1/health` | `ok` (no auth) |
-| `GET /v1/status` | checkpoint, finalized slot, seconds behind, decode failures, gaps, live clients |
+| `GET /v1/status` | checkpoint, finalized slot, seconds behind, decode failures, live clients, and open `gaps` with their time window and repair progress |
 | `GET /v1/stats` | network-wide: pools, open positions, 24h swaps / traders / active pools |
+| `GET /v1/resolve/{id}` | what an address is: `pool`, `position`, `token`, `wallet` or `tx` (powers search) |
+| `GET /v1/hydrate?pair=` · `?owner=` | `pending` / `done`: loads a pool's bins and positions (or a wallet's positions) from the chain if they were never indexed |
 | `GET /v1/pairs?q=&sort=&mint=&limit=&offset=` | pools with price, 24h volume/fees/change, TVL, symbols. `q`: address, symbol or `SOL/USDC`; `sort`: trades, volume, tvl, change, recent |
 | `GET /v1/pairs/{pair}` | one pair + `stats_24h` (trades, volume, fees, unique traders) |
 | `GET /v1/pairs/{pair}/bins?radius=35` or `?from_bin=&to_bin=` | liquidity per bin around the active bin |
@@ -235,14 +237,15 @@ deterministic mark.
 
 | Job | Default | What it does |
 |---|---|---|
-| Gap audit + repair | every 60 s (`AUDIT_INTERVAL_SECS`) | finds holes in the stored slot chain, re-fetches those blocks with `getBlock`, decodes them with the live extractor, refreshes touched accounts. Gaps up to `AUTO_REPAIR_MAX_SLOTS` (20 000) are repaired automatically. |
+| Gap audit + repair | every 60 s (`AUDIT_INTERVAL_SECS`) | finds holes in the stored slot chain and repairs every open gap with the live extractor, then refreshes the accounts the missed transactions touched. Gaps up to `AUTO_REPAIR_MAX_SLOTS` (20 000) are fetched block by block; larger ones (e.g. days offline) fetch only the blocks that contain DLMM transactions, found with `getSignaturesForAddress`. Repairs run newest-first and checkpoint progress, so a restart resumes where it stopped. |
+| On-demand hydration | when asked | the API sends `NOTIFY dlmm_hydrate` when a pool's bins/positions or a wallet's positions were never loaded; the indexer fetches exactly those accounts (filtered `getProgramAccountsV2`) in seconds. |
 | Reconciliation | every 300 s (`RECONCILE_INTERVAL_SECS`, `RECONCILE_SAMPLE`=100) | compares recently written + random accounts with on-chain state (after the indexer has passed the RPC slot, so in-flight updates aren't false alarms) and overwrites stale or closed ones. |
 
 Manual commands (same code paths):
 
 ```bash
 dlmm-indexer audit                     # scan the whole slot chain for holes
-dlmm-indexer repair-gaps               # repair all open gaps, any size
+dlmm-indexer repair-gaps               # repair all open gaps (--mode auto|blocks|signatures)
 dlmm-indexer reconcile --sample 500    # or --pubkeys A,B,C
 ```
 

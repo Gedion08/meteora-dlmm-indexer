@@ -222,6 +222,7 @@ export interface Status {
   decode_failures_24h: number;
   open_gaps: number;
   live_clients: number;
+  gaps: { from_slot: number; to_slot: number; from_time: number | null; to_time: number | null; progress: number }[];
 }
 
 export interface GlobalStats {
